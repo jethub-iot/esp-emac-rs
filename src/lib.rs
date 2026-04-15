@@ -14,6 +14,7 @@
 pub mod config;
 pub mod error;
 pub mod mdio;
+pub mod regs;
 
 pub use config::{ClkGpio, EmacConfig, RmiiClockConfig, RmiiPins};
 pub use error::EmacError;
