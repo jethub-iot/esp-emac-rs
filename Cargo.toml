@@ -1,0 +1,23 @@
+[package]
+name          = "esp-emac"
+version       = "0.1.0"
+edition       = "2021"
+rust-version  = "1.75"
+authors       = ["Viacheslav Bocharov <v@baodeep.com>", "JetHome (r)"]
+license       = "GPL-2.0-or-later OR Apache-2.0"
+description   = "ESP32 EMAC bare-metal Ethernet MAC driver with DMA, RMII, and MDIO"
+repository    = "https://github.com/jethub-iot/esp-emac"
+keywords      = ["embedded", "no-std", "esp32", "ethernet", "emac"]
+categories    = ["embedded", "no-std", "hardware-support"]
+
+[dependencies]
+embedded-hal       = "1.0"
+eth-mdio-phy       = { version = "0.1.0", path = "../eth-phy/crates/eth-mdio-phy", optional = true }
+embassy-net-driver = { version = "0.2", optional = true }
+defmt              = { version = "0.3", optional = true }
+
+[features]
+default     = []
+mdio-phy    = ["dep:eth-mdio-phy"]
+embassy-net = ["dep:embassy-net-driver"]
+defmt       = ["dep:defmt"]
