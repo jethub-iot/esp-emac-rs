@@ -52,6 +52,12 @@ impl<D, const N: usize> DescriptorRing<D, N> {
         self.current = (self.current + 1) % N;
     }
 
+    /// Advance the current index by `count`, wrapping around.
+    #[inline(always)]
+    pub fn advance_by(&mut self, count: usize) {
+        self.current = (self.current + count) % N;
+    }
+
     /// Reset the current index to 0.
     #[inline(always)]
     pub fn reset(&mut self) {

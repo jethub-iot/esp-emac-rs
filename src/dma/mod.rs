@@ -8,8 +8,10 @@
 //! each descriptor points to a data buffer and the next descriptor.
 
 mod descriptor;
+pub mod engine;
 mod ring;
 
 pub use descriptor::bits;
 pub use descriptor::{RxDescriptor, TxDescriptor, VolatileCell};
+pub use engine::DmaEngine;
 pub use ring::DescriptorRing;

@@ -16,6 +16,22 @@ pub enum EmacError {
     InvalidConfig,
     /// PHY address out of range (must be 0-31).
     InvalidPhyAddress,
+    /// Frame length is zero or otherwise invalid.
+    InvalidLength,
+    /// Frame too large for available descriptors/buffers.
+    FrameTooLarge,
+    /// No TX descriptors available (ring full).
+    NoDescriptorsAvailable,
+    /// Descriptor is still owned by DMA.
+    DescriptorBusy,
+    /// No received frame available.
+    NoFrameAvailable,
+    /// Received frame has errors (CRC, overflow, etc.).
+    FrameError,
+    /// Caller-provided buffer too small for the received frame.
+    BufferTooSmall,
+    /// DMA engine not initialized.
+    NotInitialized,
 }
 
 #[cfg(test)]

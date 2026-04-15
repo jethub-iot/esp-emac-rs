@@ -393,6 +393,12 @@ impl RxDescriptor {
     pub fn raw_rdes1(&self) -> u32 {
         self.rdes1.get()
     }
+
+    /// Set raw RDES0 value (test only — simulates DMA hardware writes).
+    #[cfg(test)]
+    pub fn set_raw_rdes0(&self, val: u32) {
+        self.rdes0.set(val);
+    }
 }
 
 impl Default for RxDescriptor {
