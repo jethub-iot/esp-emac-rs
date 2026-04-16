@@ -46,6 +46,14 @@ pub const GMACADDR0H: usize = 0x40;
 /// GMAC Address 0 Low Register (lower 32 bits of primary MAC).
 pub const GMACADDR0L: usize = 0x44;
 
+/// Bit-field constants for `GMACADDR0H`.
+pub mod addr0h {
+    /// Address Enable (AE0): when set, the MAC filters unicast frames
+    /// against ADDR0. Reset value is 1; clearing it disables unicast RX
+    /// for this slot entirely (broadcast still passes through).
+    pub const ADDRESS_ENABLE: u32 = 1 << 31;
+}
+
 // =============================================================================
 // GMACCONFIG bits
 // =============================================================================

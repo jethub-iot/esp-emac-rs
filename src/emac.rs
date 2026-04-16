@@ -439,7 +439,15 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         if self.state != EmacState::Running {
             return Err(EmacError::NotInitialized);
         }
-        self.dma.receive(buffer)
+        let result = self.dma.receive(buffer);
+        // Poke DMA RX: if it entered Suspended state after running out of
+        // CPU-owned descriptors, it won't resume on its own after we
+        // recycle them. Writing any value to DMARXPOLLDEMAND kicks it.
+        // SAFETY: peripheral clock is enabled (state == Running).
+        unsafe {
+            crate::regs::dma::write(crate::regs::dma::DMARXPOLLDEMAND, 1);
+        }
+        result
     }
 
     /// Check whether a received frame is available.
@@ -720,7 +728,8 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         unsafe {
             crate::regs::mac::write(crate::regs::mac::GMACCONFIG, cfg);
 
-            // Frame filter: pass all multicast (for now).
+            // Frame filter: pass all multicast. Unicast passes if destination
+            // MAC matches GMACADDR0 (with AE bit set in program_mac_address).
             crate::regs::mac::write(
                 crate::regs::mac::GMACFF,
                 crate::regs::mac::frame_filter::PASS_ALL_MULTICAST,
@@ -772,11 +781,16 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
     }
 
     /// Program primary MAC address into GMACADDR0H/L registers.
+    ///
+    /// Bit 31 of `GMACADDR0H` is the Address-Enable flag: when clear, the
+    /// MAC ignores unicast frames destined to this address (broadcast still
+    /// works, which masks the bug for ARP). Must stay set to receive
+    /// regular traffic.
     fn program_mac_address(&self) {
         let m = &self.mac_address;
         let low =
             (m[0] as u32) | ((m[1] as u32) << 8) | ((m[2] as u32) << 16) | ((m[3] as u32) << 24);
-        let high = (m[4] as u32) | ((m[5] as u32) << 8);
+        let high = (m[4] as u32) | ((m[5] as u32) << 8) | crate::regs::mac::addr0h::ADDRESS_ENABLE;
 
         // SAFETY: peripheral clock is enabled.
         unsafe {
