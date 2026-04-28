@@ -80,11 +80,13 @@ impl<T: Copy + Default> Default for VolatileCell<T> {
 // TX Descriptor
 // =============================================================================
 
-/// TX DMA descriptor (16 bytes, chained mode).
+/// TX DMA descriptor — enhanced 8-word layout (32 bytes).
 ///
-/// The CPU prepares descriptors and sets the OWN bit to hand them to the
-/// DMA engine for transmission. After transmission completes the DMA
-/// clears OWN and writes back status bits.
+/// The ESP32 GMAC requires the enhanced descriptor format when
+/// `DMABUSMODE.ATDS = 1` (which is what the IDF / ph-esp32-mac driver
+/// runs with). Reserved fields below are written by the DMA but unused
+/// by the CPU; they exist purely so the descriptor stride is 32 bytes
+/// and the DMA does not stomp adjacent descriptors when chained.
 #[repr(C, align(4))]
 pub struct TxDescriptor {
     /// TDES0: Status and control bits (OWN, first/last segment, etc.).
@@ -95,12 +97,20 @@ pub struct TxDescriptor {
     buffer_addr: VolatileCell<u32>,
     /// TDES3: Next descriptor address (chained mode).
     next_desc_addr: VolatileCell<u32>,
+    /// TDES4: Reserved (extended status on ESP32-P4 / ATDS-enabled devices).
+    _reserved4: VolatileCell<u32>,
+    /// TDES5: Reserved.
+    _reserved5: VolatileCell<u32>,
+    /// TDES6: Timestamp low (when timestamping is enabled).
+    _ts_low: VolatileCell<u32>,
+    /// TDES7: Timestamp high (when timestamping is enabled).
+    _ts_high: VolatileCell<u32>,
 }
 
 #[allow(dead_code)]
 impl TxDescriptor {
-    /// Descriptor size in bytes.
-    pub const SIZE: usize = 16;
+    /// Descriptor size in bytes (enhanced 8-word layout).
+    pub const SIZE: usize = 32;
 
     /// Create a new zeroed TX descriptor.
     #[must_use]
@@ -110,6 +120,10 @@ impl TxDescriptor {
             tdes1: VolatileCell::new(0),
             buffer_addr: VolatileCell::new(0),
             next_desc_addr: VolatileCell::new(0),
+            _reserved4: VolatileCell::new(0),
+            _reserved5: VolatileCell::new(0),
+            _ts_low: VolatileCell::new(0),
+            _ts_high: VolatileCell::new(0),
         }
     }
 
@@ -234,11 +248,9 @@ unsafe impl Send for TxDescriptor {}
 // RX Descriptor
 // =============================================================================
 
-/// RX DMA descriptor (16 bytes, chained mode).
+/// RX DMA descriptor — enhanced 8-word layout (32 bytes).
 ///
-/// The DMA engine fills these descriptors with received frame data and
-/// writes back status bits. The CPU reads the status, processes the
-/// frame, then returns the descriptor to DMA via [`recycle`](Self::recycle).
+/// See [`TxDescriptor`] for why we run the enhanced layout.
 #[repr(C, align(4))]
 pub struct RxDescriptor {
     /// RDES0: Status bits (OWN, first/last, frame length, errors).
@@ -249,12 +261,20 @@ pub struct RxDescriptor {
     buffer_addr: VolatileCell<u32>,
     /// RDES3: Next descriptor address (chained mode).
     next_desc_addr: VolatileCell<u32>,
+    /// RDES4: Extended status (when enabled).
+    _ext_status: VolatileCell<u32>,
+    /// RDES5: Reserved.
+    _reserved5: VolatileCell<u32>,
+    /// RDES6: Timestamp low (when timestamping is enabled).
+    _ts_low: VolatileCell<u32>,
+    /// RDES7: Timestamp high (when timestamping is enabled).
+    _ts_high: VolatileCell<u32>,
 }
 
 #[allow(dead_code)]
 impl RxDescriptor {
-    /// Descriptor size in bytes.
-    pub const SIZE: usize = 16;
+    /// Descriptor size in bytes (enhanced 8-word layout).
+    pub const SIZE: usize = 32;
 
     /// Create a new zeroed RX descriptor. Call [`setup_chained`](Self::setup_chained) before use.
     #[must_use]
@@ -264,6 +284,10 @@ impl RxDescriptor {
             rdes1: VolatileCell::new(0),
             buffer_addr: VolatileCell::new(0),
             next_desc_addr: VolatileCell::new(0),
+            _ext_status: VolatileCell::new(0),
+            _reserved5: VolatileCell::new(0),
+            _ts_low: VolatileCell::new(0),
+            _ts_high: VolatileCell::new(0),
         }
     }
 
@@ -457,7 +481,7 @@ mod tests {
 
     #[test]
     fn tx_descriptor_size() {
-        assert_eq!(core::mem::size_of::<TxDescriptor>(), 16);
+        assert_eq!(core::mem::size_of::<TxDescriptor>(), 32);
         assert_eq!(TxDescriptor::SIZE, core::mem::size_of::<TxDescriptor>());
     }
 
@@ -588,7 +612,7 @@ mod tests {
 
     #[test]
     fn rx_descriptor_size() {
-        assert_eq!(core::mem::size_of::<RxDescriptor>(), 16);
+        assert_eq!(core::mem::size_of::<RxDescriptor>(), 32);
         assert_eq!(RxDescriptor::SIZE, core::mem::size_of::<RxDescriptor>());
     }
 

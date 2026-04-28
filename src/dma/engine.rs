@@ -484,10 +484,10 @@ mod tests {
 
     #[test]
     fn memory_usage_calculation() {
-        // 4 * 16 (rx desc) + 4 * 16 (tx desc) + 4 * 256 (rx buf) + 4 * 256 (tx buf)
-        // = 64 + 64 + 1024 + 1024 = 2176
+        // 4 * 32 (rx desc) + 4 * 32 (tx desc) + 4 * 256 (rx buf) + 4 * 256 (tx buf)
+        // = 128 + 128 + 1024 + 1024 = 2304
         let usage = DmaEngine::<4, 4, 256>::memory_usage();
-        assert_eq!(usage, 2176);
+        assert_eq!(usage, 2304);
     }
 
     #[test]

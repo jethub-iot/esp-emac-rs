@@ -224,15 +224,14 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
 
         // 8. DMA bus mode and operation mode.
         //
-        // NOTE: ATDS (Alternate / Enhanced Descriptor Size) selects the
-        // 8-word (32-byte) descriptor layout. Our `dma::descriptor`
-        // structs use the 4-word (16-byte) legacy layout, so ATDS must
-        // stay clear — otherwise the DMA strides 32 bytes between
-        // descriptors and reads garbage.
+        // ATDS = enhanced 8-word descriptor layout (32 bytes per
+        // descriptor). Our `dma::descriptor::{TxDescriptor,
+        // RxDescriptor}` are now 8 words to match.
         let pbl = 32u32;
         let bus = bus_mode::FIXED_BURST
             | bus_mode::AAL
             | bus_mode::USP
+            | bus_mode::ATDS
             | ((pbl << bus_mode::PBL_SHIFT) & bus_mode::PBL_MASK);
         DmaRegs::set_bus_mode(bus);
         DmaRegs::set_operation_mode(operation::TSF | operation::RSF);
