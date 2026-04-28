@@ -21,6 +21,7 @@
 
 use core::cell::Cell;
 use core::marker::PhantomData;
+use core::sync::atomic::{AtomicU32, Ordering};
 use core::task::Context;
 
 use critical_section::Mutex;
@@ -51,6 +52,12 @@ pub struct EmacDriverState {
     tx_waker: AtomicWaker,
     link_waker: AtomicWaker,
     link_state: Mutex<Cell<LinkState>>,
+    /// Diagnostic counters — incremented in the ISR. Used by the dev-log
+    /// hypothesis H7 ("does the EMAC ISR actually fire?").
+    irq_count: AtomicU32,
+    irq_rx: AtomicU32,
+    irq_tx: AtomicU32,
+    irq_err: AtomicU32,
 }
 
 impl Default for EmacDriverState {
@@ -67,7 +74,23 @@ impl EmacDriverState {
             tx_waker: AtomicWaker::new(),
             link_waker: AtomicWaker::new(),
             link_state: Mutex::new(Cell::new(LinkState::Down)),
+            irq_count: AtomicU32::new(0),
+            irq_rx: AtomicU32::new(0),
+            irq_tx: AtomicU32::new(0),
+            irq_err: AtomicU32::new(0),
         }
+    }
+
+    /// Read the ISR counters (total, rx-events, tx-events, error-events).
+    ///
+    /// Diagnostic only.
+    pub fn irq_counters(&self) -> (u32, u32, u32, u32) {
+        (
+            self.irq_count.load(Ordering::Relaxed),
+            self.irq_rx.load(Ordering::Relaxed),
+            self.irq_tx.load(Ordering::Relaxed),
+            self.irq_err.load(Ordering::Relaxed),
+        )
     }
 
     /// Read the cached link state.
@@ -121,6 +144,18 @@ impl EmacDriverState {
         // SAFETY: same address; bits are W1C — writing the snapshot back
         // clears every flag the snapshot observed.
         unsafe { core::ptr::write_volatile(dmastat as *mut u32, status.to_raw()) };
+
+        self.irq_count.fetch_add(1, Ordering::Relaxed);
+        if status.rx_complete || status.rx_buf_unavailable {
+            self.irq_rx.fetch_add(1, Ordering::Relaxed);
+        }
+        if status.tx_complete || status.tx_buf_unavailable {
+            self.irq_tx.fetch_add(1, Ordering::Relaxed);
+        }
+        if status.has_error() {
+            self.irq_err.fetch_add(1, Ordering::Relaxed);
+        }
+
         self.on_interrupt_status(status);
     }
 }

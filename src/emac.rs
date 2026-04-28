@@ -204,7 +204,8 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         ExtRegs::power_up_ram();
 
         // 6. Software reset of the DMA controller.
-        let mut reset_ctrl = ResetController::with_timeout(BorrowedDelay(delay), SOFT_RESET_TIMEOUT_MS);
+        let mut reset_ctrl =
+            ResetController::with_timeout(BorrowedDelay(delay), SOFT_RESET_TIMEOUT_MS);
         reset_ctrl.soft_reset().map_err(|_| EmacError::Timeout)?;
 
         // 7. MAC configuration defaults: 100 Mbps full duplex, port select,
@@ -492,6 +493,9 @@ mod tests {
 
     #[test]
     fn memory_usage_matches_dma() {
-        assert_eq!(EmacDefault::memory_usage(), DmaEngine::<10, 10, 1600>::memory_usage());
+        assert_eq!(
+            EmacDefault::memory_usage(),
+            DmaEngine::<10, 10, 1600>::memory_usage()
+        );
     }
 }
