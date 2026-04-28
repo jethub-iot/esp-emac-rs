@@ -3,15 +3,25 @@
 
 //! ESP32 EMAC Ethernet MAC driver.
 //!
-//! Phase 1 of the esp-emac migration: delegates the MAC/DMA work to
-//! [`ph_esp32_mac`] while exposing the esp-emac public surface that
-//! firmware depends on (our [`EmacConfig`], [`Emac`], [`EspMdio`],
-//! embassy-net integration). APLL 50 MHz clock generation and the
-//! RMII clock-pin setup stay in our [`clock`] module — ph-esp32-mac
-//! does not handle those.
+//! # Phase 1 status
 //!
-//! Future phases will replace the internal delegations piece by piece
-//! (see `docs/plans/esp-emac-migration.md` in the firmware repo).
+//! [`Emac::init`](crate::emac::Emac::init) configures APLL 50 MHz and
+//! the RMII clock GPIO via our own [`clock`] module, and then delegates
+//! the rest of MAC/DMA bring-up (SMI/RMII pins, DPORT clock, software
+//! reset, MAC/DMA defaults, descriptor chains, MAC address filter) to
+//! [`ph_esp32_mac::Emac::init`]. This is the only Phase 1 piece that is
+//! known to be cold-boot stable on the JXD-PM380-E1ETH stand.
+//!
+//! The runtime data path — PHY driver, MDIO bus, and embassy-net glue
+//! — is still provided by ph-esp32-mac in the firmware: our own
+//! [`EspMdio`] / [`embassy::EmacDriver`] and the sibling
+//! `eth-phy-lan87xx` crate currently wedge unicast RX after a power
+//! cycle. Their replacement is tracked by phases 3.x in the migration
+//! plan. Until then, firmware reaches into ph-esp32-mac through the
+//! escape hatch [`Emac::inner_mut`](crate::emac::Emac::inner_mut).
+//!
+//! See `docs/plans/esp-emac-migration.md` in the firmware repository
+//! for the staged rewrite roadmap.
 
 #![no_std]
 

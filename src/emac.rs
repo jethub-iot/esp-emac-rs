@@ -300,9 +300,19 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
 
     /// Access the underlying `ph-esp32-mac` driver.
     ///
-    /// Used by the embassy-net integration to hand the inner driver to
-    /// `ph_esp32_mac::integration::embassy_net::EmbassyEmac`. Removed when
-    /// esp-emac becomes a standalone implementation (see migration plan).
+    /// **This is a temporary escape hatch** introduced in Phase 1 of the
+    /// migration plan. It exists so the firmware can continue to use
+    /// `ph-esp32-mac` directly for PHY, MDIO, and embassy-net glue while
+    /// EMAC bring-up itself moves into esp-emac. Cold-boot regression
+    /// hunting on the JXD-PM380-E1ETH stand showed that our own PHY
+    /// driver (`eth-phy-lan87xx`), our MDIO bus (`EspMdio`), and our
+    /// `embassy::EmacDriver` wrapper still have a bug that wedges
+    /// unicast RX after a power cycle; routing the runtime path through
+    /// the proven-working ph-esp32-mac integration sidesteps it for now.
+    ///
+    /// Removed when phases 3.x replace the `eth-phy-lan87xx`/MDIO/embassy
+    /// path piece by piece. See `docs/plans/esp-emac-migration.md` in
+    /// the firmware repository.
     #[doc(hidden)]
     pub fn inner_mut(&mut self) -> &mut ph_esp32_mac::Emac<RX, TX, BUF> {
         &mut self.inner
