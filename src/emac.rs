@@ -289,7 +289,13 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
     }
 
     /// Stop TX/RX.
-    pub fn stop(&mut self) -> Result<(), EmacError> {
+    ///
+    /// Polls the TX-FIFO flush bit (`FTF`) for up to
+    /// `TX_FIFO_FLUSH_TIMEOUT_US` microseconds, sleeping `delay` between
+    /// polls so the DMA actually has time to drain. If the timeout
+    /// expires the function still tears the rest of the path down —
+    /// driver state ends up in `Initialized` either way.
+    pub fn stop(&mut self, delay: &mut impl DelayNs) -> Result<(), EmacError> {
         if self.state != EmacState::Running {
             return Err(EmacError::NotInitialized);
         }
@@ -299,12 +305,14 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
 
         // Flush TX FIFO and wait for the bit to self-clear.
         dma_regs::flush_tx_fifo();
+        const POLL_STEP_US: u32 = 10;
         let mut waited_us = 0u32;
         while waited_us < TX_FIFO_FLUSH_TIMEOUT_US {
             if (dma_regs::operation_mode() & operation::FTF) == 0 {
                 break;
             }
-            waited_us += 10;
+            delay.delay_us(POLL_STEP_US);
+            waited_us += POLL_STEP_US;
         }
 
         // Disable MAC TX and RX, then DMA RX.
