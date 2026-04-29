@@ -373,17 +373,25 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
     }
 
     /// Receive a frame, if any.
+    ///
+    /// Issues an RX poll-demand whenever a descriptor was potentially
+    /// recycled by `DmaEngine::receive` — that includes the success
+    /// path (`Ok(Some(_))`) **and** the error paths (`FrameError`,
+    /// `BufferTooSmall`, …) where the engine still hands the descriptor
+    /// back to the DMA. Only `Ok(None)` skips the kick, since nothing
+    /// in the ring changed. Without this, an errored frame on a
+    /// suspended ring would leave RX wedged with the `RU` bit asserted
+    /// until the next *successful* receive — exactly the kind of
+    /// post-error hang we hit in the field.
     pub fn receive(&mut self, buffer: &mut [u8]) -> Result<Option<usize>, EmacError> {
         if self.state != EmacState::Running {
             return Err(EmacError::NotInitialized);
         }
-        let result = self.dma.receive(buffer)?;
-        if result.is_some() {
-            // After freeing a descriptor, kick the RX poll demand so the
-            // DMA leaves Suspended state.
+        let result = self.dma.receive(buffer);
+        if !matches!(result, Ok(None)) {
             dma_regs::rx_poll_demand();
         }
-        Ok(result)
+        result
     }
 
     /// Whether a received frame is currently waiting in the ring.
