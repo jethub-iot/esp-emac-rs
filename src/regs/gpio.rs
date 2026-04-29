@@ -25,14 +25,20 @@
 /// GPIO peripheral base address.
 pub const GPIO_BASE: usize = 0x3FF4_4000;
 
-/// `GPIO_OUT_W1TS` — output set (write-1-to-set).
+/// `GPIO_OUT_W1TS` — output set (write-1-to-set), GPIO 0-31.
 pub const GPIO_OUT_W1TS_OFFSET: usize = 0x08;
-/// `GPIO_OUT_W1TC` — output clear (write-1-to-clear).
+/// `GPIO_OUT_W1TC` — output clear (write-1-to-clear), GPIO 0-31.
 pub const GPIO_OUT_W1TC_OFFSET: usize = 0x0C;
-/// `GPIO_ENABLE_W1TS` — enable set (write-1-to-set).
+/// `GPIO_ENABLE_W1TS` — output-enable set (write-1-to-set), GPIO 0-31.
 pub const GPIO_ENABLE_W1TS_OFFSET: usize = 0x24;
-/// `GPIO_ENABLE_W1TC` — enable clear (write-1-to-clear).
+/// `GPIO_ENABLE_W1TC` — output-enable clear (write-1-to-clear), GPIO 0-31.
 pub const GPIO_ENABLE_W1TC_OFFSET: usize = 0x28;
+/// `GPIO_ENABLE1_W1TS` — output-enable set (write-1-to-set), GPIO 32-39.
+/// Bit `N` in this register corresponds to GPIO `32 + N`.
+pub const GPIO_ENABLE1_W1TS_OFFSET: usize = 0x30;
+/// `GPIO_ENABLE1_W1TC` — output-enable clear (write-1-to-clear), GPIO 32-39.
+/// Bit `N` in this register corresponds to GPIO `32 + N`.
+pub const GPIO_ENABLE1_W1TC_OFFSET: usize = 0x34;
 /// Base offset of `GPIO_FUNCx_IN_SEL_CFG_REG`. Per-signal stride 4.
 pub const GPIO_FUNC_IN_SEL_CFG_BASE: usize = 0x130;
 /// Base offset of `GPIO_FUNCx_OUT_SEL_CFG_REG`. Per-GPIO stride 4.
@@ -120,7 +126,7 @@ fn configure_mdc(gpio_num: u8) {
             let new_val = (cur & !IO_MUX_MCU_SEL_MASK) | (IO_MUX_FUNC_GPIO << IO_MUX_MCU_SEL_SHIFT);
             write_reg(iomux, new_val);
         }
-        write_reg(GPIO_BASE + GPIO_ENABLE_W1TS_OFFSET, 1u32 << gpio_num);
+        gpio_output_enable_set(gpio_num);
         let out_sel = GPIO_BASE + GPIO_FUNC_OUT_SEL_CFG_BASE + (gpio_num as usize * 4);
         write_reg(
             out_sel,
@@ -139,7 +145,7 @@ fn configure_mdio(gpio_num: u8) {
                 | IO_MUX_FUN_IE;
             write_reg(iomux, new_val);
         }
-        write_reg(GPIO_BASE + GPIO_ENABLE_W1TS_OFFSET, 1u32 << gpio_num);
+        gpio_output_enable_set(gpio_num);
         // GPIO output → EMAC_MDO_O (peripheral controls OE).
         let out_sel = GPIO_BASE + GPIO_FUNC_OUT_SEL_CFG_BASE + (gpio_num as usize * 4);
         write_reg(
@@ -215,6 +221,30 @@ unsafe fn read_reg(addr: usize) -> u32 {
 unsafe fn write_reg(addr: usize, val: u32) {
     // SAFETY: caller guarantees address validity.
     unsafe { core::ptr::write_volatile(addr as *mut u32, val) }
+}
+
+/// Set the output-enable bit for `gpio_num` via the appropriate
+/// `GPIO_ENABLE*_W1TS_REG`. Splits into the upper bank (`GPIO_ENABLE1`)
+/// for GPIO 32-39, where a `1u32 << gpio_num` shift in the lower-bank
+/// register would either alias another GPIO or invoke shift-overflow UB.
+///
+/// # Safety
+///
+/// Writes to the GPIO peripheral. Caller must ensure `gpio_num <= 39`
+/// (the only physical range on ESP32). Out-of-range numbers are a no-op.
+#[inline]
+unsafe fn gpio_output_enable_set(gpio_num: u8) {
+    // SAFETY: GPIO_BASE + offset is a known-valid 32-bit register.
+    unsafe {
+        if gpio_num < 32 {
+            write_reg(GPIO_BASE + GPIO_ENABLE_W1TS_OFFSET, 1u32 << gpio_num);
+        } else if gpio_num < 40 {
+            write_reg(
+                GPIO_BASE + GPIO_ENABLE1_W1TS_OFFSET,
+                1u32 << (gpio_num - 32),
+            );
+        }
+    }
 }
 
 /// IO_MUX register address for a given GPIO. Per ESP32 TRM Table 4-3 the
@@ -299,5 +329,16 @@ mod tests {
     fn iomux_unknown_gpio_returns_none() {
         assert_eq!(iomux_addr_for_gpio(20), Some(0x3FF4_9078));
         assert_eq!(iomux_addr_for_gpio(40), None);
+    }
+
+    #[test]
+    fn enable_register_offsets() {
+        // Per ESP32 TRM section 4.10 ("GPIO Matrix and IO_MUX") and
+        // esp-idf `soc/gpio_reg.h`: GPIO 0-31 use the W1TS at +0x24,
+        // GPIO 32-39 use the upper-bank W1TS at +0x30.
+        assert_eq!(GPIO_BASE + GPIO_ENABLE_W1TS_OFFSET, 0x3FF4_4024);
+        assert_eq!(GPIO_BASE + GPIO_ENABLE_W1TC_OFFSET, 0x3FF4_4028);
+        assert_eq!(GPIO_BASE + GPIO_ENABLE1_W1TS_OFFSET, 0x3FF4_4030);
+        assert_eq!(GPIO_BASE + GPIO_ENABLE1_W1TC_OFFSET, 0x3FF4_4034);
     }
 }
