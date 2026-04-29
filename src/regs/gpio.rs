@@ -1,0 +1,303 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR Apache-2.0
+// Copyright (c) Viacheslav Bocharov <v@baodeep.com> and JetHome (r)
+
+//! GPIO Matrix configuration for ESP32 EMAC SMI and RMII signals.
+//!
+//! The SMI signals (MDC, MDIO) are routed through the GPIO Matrix, so any
+//! GPIO can be picked for them. The RMII data pins are *not* routable —
+//! they are pinned to fixed GPIOs (TXD0=19, TXD1=22, TX_EN=21, RXD0=25,
+//! RXD1=26, CRS_DV=27) and must be selected through IO_MUX function 5.
+//!
+//! Signal table:
+//!
+//! | Signal       | Index | Direction | Default GPIO |
+//! |--------------|-------|-----------|--------------|
+//! | EMAC_MDC_O   | 200   | Output    | GPIO23       |
+//! | EMAC_MDI_I   | 201   | Input     | GPIO18       |
+//! | EMAC_MDO_O   | 201   | Output    | GPIO18       |
+
+#![allow(dead_code)]
+
+// =============================================================================
+// GPIO peripheral
+// =============================================================================
+
+/// GPIO peripheral base address.
+pub const GPIO_BASE: usize = 0x3FF4_4000;
+
+/// `GPIO_OUT_W1TS` — output set (write-1-to-set).
+pub const GPIO_OUT_W1TS_OFFSET: usize = 0x08;
+/// `GPIO_OUT_W1TC` — output clear (write-1-to-clear).
+pub const GPIO_OUT_W1TC_OFFSET: usize = 0x0C;
+/// `GPIO_ENABLE_W1TS` — enable set (write-1-to-set).
+pub const GPIO_ENABLE_W1TS_OFFSET: usize = 0x24;
+/// `GPIO_ENABLE_W1TC` — enable clear (write-1-to-clear).
+pub const GPIO_ENABLE_W1TC_OFFSET: usize = 0x28;
+/// Base offset of `GPIO_FUNCx_IN_SEL_CFG_REG`. Per-signal stride 4.
+pub const GPIO_FUNC_IN_SEL_CFG_BASE: usize = 0x130;
+/// Base offset of `GPIO_FUNCx_OUT_SEL_CFG_REG`. Per-GPIO stride 4.
+pub const GPIO_FUNC_OUT_SEL_CFG_BASE: usize = 0x530;
+
+/// Signal index for the EMAC MDC output.
+pub const EMAC_MDC_O_IDX: u32 = 200;
+/// Signal index for the EMAC MDIO input.
+pub const EMAC_MDI_I_IDX: u32 = 201;
+/// Signal index for the EMAC MDIO output.
+pub const EMAC_MDO_O_IDX: u32 = 201;
+
+/// Function output select field mask in `GPIO_FUNCx_OUT_SEL_CFG_REG` (bits 8:0).
+pub const GPIO_FUNC_OUT_SEL_MASK: u32 = 0x1FF;
+/// Bit 10 of `GPIO_FUNCx_OUT_SEL_CFG_REG`: peripheral controls output enable.
+pub const GPIO_OEN_SEL: u32 = 1 << 10;
+/// "Disconnect" value for the output select field — routes the IO_MUX
+/// peripheral function instead of any GPIO Matrix signal.
+pub const GPIO_OUT_SEL_DISCONNECT: u32 = 256;
+/// Function input select field mask in `GPIO_FUNCx_IN_SEL_CFG_REG` (bits 5:0).
+pub const GPIO_FUNC_IN_SEL_MASK: u32 = 0x3F;
+/// Bit 7 of `GPIO_FUNCx_IN_SEL_CFG_REG`: route through GPIO Matrix.
+pub const GPIO_SIG_IN_SEL: u32 = 1 << 7;
+
+// =============================================================================
+// IO_MUX
+// =============================================================================
+
+/// IO_MUX base address.
+pub const IO_MUX_BASE: usize = 0x3FF4_9000;
+/// IO_MUX `MCU_SEL` field shift (bits 14:12).
+pub const IO_MUX_MCU_SEL_SHIFT: u32 = 12;
+/// IO_MUX `MCU_SEL` field mask.
+pub const IO_MUX_MCU_SEL_MASK: u32 = 0x07 << 12;
+/// `MCU_SEL=2` selects "GPIO Matrix" routing.
+pub const IO_MUX_FUNC_GPIO: u32 = 2;
+/// `MCU_SEL=5` selects EMAC peripheral function for fixed RMII pins.
+pub const IO_MUX_FUNC_EMAC: u32 = 5;
+/// IO_MUX `FUN_IE` (bit 9) — input buffer enable.
+pub const IO_MUX_FUN_IE: u32 = 1 << 9;
+/// IO_MUX `FUN_DRV` field shift (bits 11:10).
+pub const IO_MUX_FUN_DRV_SHIFT: u32 = 10;
+/// IO_MUX `FUN_DRV` field mask.
+pub const IO_MUX_FUN_DRV_MASK: u32 = 0x03 << 10;
+
+// =============================================================================
+// Public configuration entry points
+// =============================================================================
+
+/// Route MDC (GPIO23) and MDIO (GPIO18) through the GPIO Matrix to the
+/// EMAC SMI pins. Must be called before any MDIO transaction.
+pub fn configure_smi_pins() {
+    configure_mdc(23);
+    configure_mdio(18);
+}
+
+/// Route MDC and MDIO through user-chosen GPIOs.
+pub fn configure_smi_pins_custom(mdc_gpio: u8, mdio_gpio: u8) {
+    configure_mdc(mdc_gpio);
+    configure_mdio(mdio_gpio);
+}
+
+/// Route the six fixed RMII data pins through IO_MUX function 5
+/// (TXD0/TXD1/TX_EN/RXD0/RXD1/CRS_DV). Must be called during EMAC init.
+pub fn configure_rmii_pins() {
+    // TX (output): GPIO19, GPIO22, GPIO21
+    configure_iomux_output(19, IO_MUX_FUNC_EMAC);
+    configure_iomux_output(22, IO_MUX_FUNC_EMAC);
+    configure_iomux_output(21, IO_MUX_FUNC_EMAC);
+    // RX (input): GPIO25, GPIO26, GPIO27
+    configure_iomux_input(25, IO_MUX_FUNC_EMAC);
+    configure_iomux_input(26, IO_MUX_FUNC_EMAC);
+    configure_iomux_input(27, IO_MUX_FUNC_EMAC);
+}
+
+// =============================================================================
+// MDC / MDIO routing through GPIO Matrix
+// =============================================================================
+
+fn configure_mdc(gpio_num: u8) {
+    // SAFETY: all addresses are valid 32-bit ESP32 peripheral registers.
+    unsafe {
+        if let Some(iomux) = iomux_addr_for_gpio(gpio_num) {
+            let cur = read_reg(iomux);
+            let new_val = (cur & !IO_MUX_MCU_SEL_MASK) | (IO_MUX_FUNC_GPIO << IO_MUX_MCU_SEL_SHIFT);
+            write_reg(iomux, new_val);
+        }
+        write_reg(GPIO_BASE + GPIO_ENABLE_W1TS_OFFSET, 1u32 << gpio_num);
+        let out_sel = GPIO_BASE + GPIO_FUNC_OUT_SEL_CFG_BASE + (gpio_num as usize * 4);
+        write_reg(
+            out_sel,
+            (EMAC_MDC_O_IDX & GPIO_FUNC_OUT_SEL_MASK) | GPIO_OEN_SEL,
+        );
+    }
+}
+
+fn configure_mdio(gpio_num: u8) {
+    // SAFETY: all addresses are valid 32-bit ESP32 peripheral registers.
+    unsafe {
+        if let Some(iomux) = iomux_addr_for_gpio(gpio_num) {
+            let cur = read_reg(iomux);
+            let new_val = (cur & !IO_MUX_MCU_SEL_MASK)
+                | (IO_MUX_FUNC_GPIO << IO_MUX_MCU_SEL_SHIFT)
+                | IO_MUX_FUN_IE;
+            write_reg(iomux, new_val);
+        }
+        write_reg(GPIO_BASE + GPIO_ENABLE_W1TS_OFFSET, 1u32 << gpio_num);
+        // GPIO output → EMAC_MDO_O (peripheral controls OE).
+        let out_sel = GPIO_BASE + GPIO_FUNC_OUT_SEL_CFG_BASE + (gpio_num as usize * 4);
+        write_reg(
+            out_sel,
+            (EMAC_MDO_O_IDX & GPIO_FUNC_OUT_SEL_MASK) | GPIO_OEN_SEL,
+        );
+        // EMAC_MDI_I ← GPIO input.
+        let in_sel = GPIO_BASE + GPIO_FUNC_IN_SEL_CFG_BASE + (EMAC_MDI_I_IDX as usize * 4);
+        write_reg(
+            in_sel,
+            (gpio_num as u32 & GPIO_FUNC_IN_SEL_MASK) | GPIO_SIG_IN_SEL,
+        );
+    }
+}
+
+// =============================================================================
+// IO_MUX direct routing (for the fixed RMII data pins)
+// =============================================================================
+
+fn configure_iomux_output(gpio_num: u8, func: u32) {
+    let Some(iomux) = iomux_addr_for_gpio(gpio_num) else {
+        return;
+    };
+    // SAFETY: IO_MUX[gpio] and the GPIO Matrix output-sel register are valid.
+    unsafe {
+        let cur = read_reg(iomux);
+        // Clear MCU_SEL/FUN_IE/FUN_DRV/pull-up/pull-down, set MCU_SEL=func,
+        // set FUN_DRV=3 (max).
+        let new_val = (cur
+            & !IO_MUX_MCU_SEL_MASK
+            & !(1 << 7)
+            & !(1 << 8)
+            & !IO_MUX_FUN_IE
+            & !IO_MUX_FUN_DRV_MASK)
+            | (func << IO_MUX_MCU_SEL_SHIFT)
+            | (3 << IO_MUX_FUN_DRV_SHIFT);
+        write_reg(iomux, new_val);
+        // Disconnect any GPIO Matrix output mapped to this pin.
+        let out_sel = GPIO_BASE + GPIO_FUNC_OUT_SEL_CFG_BASE + (gpio_num as usize * 4);
+        write_reg(out_sel, GPIO_OUT_SEL_DISCONNECT);
+    }
+}
+
+fn configure_iomux_input(gpio_num: u8, func: u32) {
+    let Some(iomux) = iomux_addr_for_gpio(gpio_num) else {
+        return;
+    };
+    // SAFETY: IO_MUX[gpio] and the GPIO Matrix output-sel register are valid.
+    unsafe {
+        let cur = read_reg(iomux);
+        // Clear MCU_SEL/pull-up/pull-down, set MCU_SEL=func, enable input.
+        let new_val = (cur & !IO_MUX_MCU_SEL_MASK & !(1 << 7) & !(1 << 8))
+            | (func << IO_MUX_MCU_SEL_SHIFT)
+            | IO_MUX_FUN_IE;
+        write_reg(iomux, new_val);
+        // Disconnect any GPIO Matrix output mapped to this pin.
+        let out_sel = GPIO_BASE + GPIO_FUNC_OUT_SEL_CFG_BASE + (gpio_num as usize * 4);
+        write_reg(out_sel, GPIO_OUT_SEL_DISCONNECT);
+    }
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+#[inline(always)]
+unsafe fn read_reg(addr: usize) -> u32 {
+    // SAFETY: caller guarantees address validity.
+    unsafe { core::ptr::read_volatile(addr as *const u32) }
+}
+
+#[inline(always)]
+unsafe fn write_reg(addr: usize, val: u32) {
+    // SAFETY: caller guarantees address validity.
+    unsafe { core::ptr::write_volatile(addr as *mut u32, val) }
+}
+
+/// IO_MUX register address for a given GPIO. Per ESP32 TRM Table 4-3 the
+/// IO_MUX layout is non-sequential, so we have an explicit lookup. Returns
+/// `None` for GPIOs that have no IO_MUX register (e.g. GPIO20 / 24).
+fn iomux_addr_for_gpio(gpio_num: u8) -> Option<usize> {
+    let offset = match gpio_num {
+        0 => 0x44,
+        1 => 0x88,
+        2 => 0x40,
+        3 => 0x84,
+        4 => 0x48,
+        5 => 0x6C,
+        6 => 0x60,
+        7 => 0x64,
+        8 => 0x68,
+        9 => 0x54,
+        10 => 0x58,
+        11 => 0x5C,
+        12 => 0x34,
+        13 => 0x38,
+        14 => 0x30,
+        15 => 0x3C,
+        16 => 0x4C,
+        17 => 0x50,
+        18 => 0x70,
+        19 => 0x74,
+        20 => 0x78,
+        21 => 0x7C,
+        22 => 0x80,
+        23 => 0x8C,
+        25 => 0x24,
+        26 => 0x28,
+        27 => 0x2C,
+        32 => 0x1C,
+        33 => 0x20,
+        34 => 0x14,
+        35 => 0x18,
+        36 => 0x04,
+        37 => 0x08,
+        38 => 0x0C,
+        39 => 0x10,
+        _ => return None,
+    };
+    Some(IO_MUX_BASE + offset)
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_indices() {
+        assert_eq!(EMAC_MDC_O_IDX, 200);
+        assert_eq!(EMAC_MDI_I_IDX, 201);
+        assert_eq!(EMAC_MDO_O_IDX, 201);
+    }
+
+    #[test]
+    fn out_sel_address_gpio23() {
+        let addr = GPIO_BASE + GPIO_FUNC_OUT_SEL_CFG_BASE + (23 * 4);
+        assert_eq!(addr, 0x3FF4_458C);
+    }
+
+    #[test]
+    fn in_sel_address_emac_mdi() {
+        let addr = GPIO_BASE + GPIO_FUNC_IN_SEL_CFG_BASE + (EMAC_MDI_I_IDX as usize * 4);
+        assert_eq!(addr, 0x3FF4_4454);
+    }
+
+    #[test]
+    fn iomux_addresses_for_smi() {
+        assert_eq!(iomux_addr_for_gpio(18), Some(0x3FF4_9070));
+        assert_eq!(iomux_addr_for_gpio(23), Some(0x3FF4_908C));
+    }
+
+    #[test]
+    fn iomux_unknown_gpio_returns_none() {
+        assert_eq!(iomux_addr_for_gpio(20), Some(0x3FF4_9078));
+        assert_eq!(iomux_addr_for_gpio(40), None);
+    }
+}

@@ -10,4 +10,5 @@
 
 pub mod dma;
 pub mod ext;
+pub mod gpio;
 pub mod mac;

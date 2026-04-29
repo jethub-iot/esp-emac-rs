@@ -12,9 +12,10 @@
 
 use embedded_hal::delay::DelayNs;
 
-use ph_esp32_mac::unsafe_registers::{DmaRegs, GpioMatrix, ResetController};
+use ph_esp32_mac::unsafe_registers::{DmaRegs, ResetController};
 
 use crate::regs::ext as ext_regs;
+use crate::regs::gpio as gpio_matrix;
 use crate::regs::mac as mac_regs;
 
 use crate::config::{ClkGpio, EmacConfig, RmiiClockConfig};
@@ -189,8 +190,8 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         if matches!(self.config.clock, RmiiClockConfig::External { .. }) {
             ext_regs::configure_gpio0_rmii_clock_input();
         }
-        GpioMatrix::configure_smi_pins();
-        GpioMatrix::configure_rmii_pins();
+        gpio_matrix::configure_smi_pins();
+        gpio_matrix::configure_rmii_pins();
 
         // 3. Enable EMAC peripheral clock through DPORT.
         ext_regs::enable_peripheral_clock();
