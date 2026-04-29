@@ -188,14 +188,25 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             return Err(EmacError::InvalidConfig);
         }
 
+        // External REF_CLK input on ESP32 only works on GPIO0 — that's
+        // the only pad whose IO_MUX function 5 is `EMAC_TX_CLK` (an
+        // input). On GPIO16/GPIO17, function 5 is `EMAC_CLK_OUT` /
+        // `EMAC_CLK_OUT_180` (outputs), so picking them for external
+        // input is a misconfiguration the hardware can't honour.
+        if let RmiiClockConfig::External { gpio } = self.config.clock {
+            if !matches!(gpio, ClkGpio::Gpio0) {
+                return Err(EmacError::InvalidConfig);
+            }
+        }
+
         // 1. Clock GPIO + APLL (or input pad for external clock).
+        //    For `External { Gpio0 }` this configures IO_MUX function 5
+        //    on GPIO0, which is the only valid REF_CLK input pad — no
+        //    extra `configure_gpio0_rmii_clock_input` call is needed.
         self.configure_clock();
 
         // 2. Configure SMI pins (MDC/MDIO from `EmacConfig::pins`) and
         //    RMII data pins (fixed function 5 — not configurable).
-        if matches!(self.config.clock, RmiiClockConfig::External { .. }) {
-            ext_regs::configure_gpio0_rmii_clock_input();
-        }
         gpio_matrix::configure_smi_pins(self.config.pins.mdc, self.config.pins.mdio);
         gpio_matrix::configure_rmii_pins();
 
