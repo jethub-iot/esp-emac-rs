@@ -304,9 +304,15 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
     /// polls so the DMA actually has time to drain. If the timeout
     /// expires the function still tears the rest of the path down —
     /// driver state ends up in `Initialized` either way.
+    ///
+    /// Idempotent on an already-stopped driver: calling `stop` while in
+    /// `Initialized` returns `Ok(())` without touching hardware. Only
+    /// `Uninitialized` is rejected with `EmacError::NotInitialized`.
     pub fn stop(&mut self, delay: &mut impl DelayNs) -> Result<(), EmacError> {
-        if self.state != EmacState::Running {
-            return Err(EmacError::NotInitialized);
+        match self.state {
+            EmacState::Running => {} // proceed with the tear-down below
+            EmacState::Initialized => return Ok(()),
+            EmacState::Uninitialized => return Err(EmacError::NotInitialized),
         }
 
         // Stop DMA TX, wait for in-flight data to drain (best effort).
