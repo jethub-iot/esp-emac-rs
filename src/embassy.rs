@@ -33,100 +33,6 @@ use embassy_sync::waitqueue::AtomicWaker;
 use crate::emac::Emac;
 use crate::interrupt::InterruptStatus;
 
-/// First 64 bytes of the most recent received ARP frame (eth_type 0x0806).
-/// Diagnostic for H11/H12 ("are ARP-for-our-IP frames being parsed?").
-static LAST_ARP_HEAD: critical_section::Mutex<core::cell::Cell<[u8; 64]>> =
-    critical_section::Mutex::new(core::cell::Cell::new([0u8; 64]));
-static LAST_ARP_LEN: AtomicU32 = AtomicU32::new(0);
-static ARP_FRAME_SEQ: AtomicU32 = AtomicU32::new(0);
-
-/// First 64 bytes of the most recent received unicast frame (frames whose
-/// destination MAC has the multicast bit clear).
-static LAST_UNICAST_HEAD: critical_section::Mutex<core::cell::Cell<[u8; 64]>> =
-    critical_section::Mutex::new(core::cell::Cell::new([0u8; 64]));
-static LAST_UNICAST_LEN: AtomicU32 = AtomicU32::new(0);
-static UNICAST_FRAME_SEQ: AtomicU32 = AtomicU32::new(0);
-
-/// First 64 bytes of the most recent transmitted frame.
-/// Diagnostic for H12/H13 ("does smoltcp actually generate replies?").
-static LAST_TX_HEAD: critical_section::Mutex<core::cell::Cell<[u8; 64]>> =
-    critical_section::Mutex::new(core::cell::Cell::new([0u8; 64]));
-static LAST_TX_LEN: AtomicU32 = AtomicU32::new(0);
-/// Counter incremented every time `EmacTxToken::consume` runs (frame
-/// submitted to DMA — covers BOTH `Driver::transmit` AND the TxToken
-/// returned by `Driver::receive`, which is what smoltcp uses for ARP /
-/// ICMP replies generated as a side-effect of RX processing).
-static TX_TOKEN_CONSUMES: AtomicU32 = AtomicU32::new(0);
-
-/// Total bytes pushed through `EmacTxToken::consume`.
-static TX_TOKEN_BYTES: AtomicU32 = AtomicU32::new(0);
-
-fn snapshot_tx_frame(buf: &[u8]) {
-    TX_TOKEN_CONSUMES.fetch_add(1, Ordering::Relaxed);
-    TX_TOKEN_BYTES.fetch_add(buf.len() as u32, Ordering::Relaxed);
-    LAST_TX_LEN.store(buf.len() as u32, Ordering::Relaxed);
-    let mut head = [0u8; 64];
-    let n = buf.len().min(64);
-    head[..n].copy_from_slice(&buf[..n]);
-    critical_section::with(|cs| LAST_TX_HEAD.borrow(cs).set(head));
-}
-
-/// `(consumes, total_bytes, last_len, last_head)`.
-pub fn last_tx_frame() -> (u32, u32, u32, [u8; 64]) {
-    (
-        TX_TOKEN_CONSUMES.load(Ordering::Relaxed),
-        TX_TOKEN_BYTES.load(Ordering::Relaxed),
-        LAST_TX_LEN.load(Ordering::Relaxed),
-        critical_section::with(|cs| LAST_TX_HEAD.borrow(cs).get()),
-    )
-}
-
-/// Snapshot the head of an inbound RX frame for a periodic diag task to
-/// inspect. Called by [`EmacRxToken::consume`]. Captures into separate
-/// "last ARP" and "last unicast" buffers so the diag task can show
-/// frames the firmware ought to act on without being drowned in
-/// broadcast/multicast noise.
-fn snapshot_rx_frame(buf: &[u8]) {
-    if buf.len() < 14 {
-        return;
-    }
-    let eth_type = ((buf[12] as u16) << 8) | (buf[13] as u16);
-    let dst_is_group = buf[0] & 0x01 != 0;
-
-    let mut head = [0u8; 64];
-    let n = buf.len().min(64);
-    head[..n].copy_from_slice(&buf[..n]);
-
-    if eth_type == 0x0806 {
-        ARP_FRAME_SEQ.fetch_add(1, Ordering::Relaxed);
-        LAST_ARP_LEN.store(buf.len() as u32, Ordering::Relaxed);
-        critical_section::with(|cs| LAST_ARP_HEAD.borrow(cs).set(head));
-    }
-    if !dst_is_group {
-        UNICAST_FRAME_SEQ.fetch_add(1, Ordering::Relaxed);
-        LAST_UNICAST_LEN.store(buf.len() as u32, Ordering::Relaxed);
-        critical_section::with(|cs| LAST_UNICAST_HEAD.borrow(cs).set(head));
-    }
-}
-
-/// `(arp_seq, arp_len, arp_head)`.
-pub fn last_arp_frame() -> (u32, u32, [u8; 64]) {
-    (
-        ARP_FRAME_SEQ.load(Ordering::Relaxed),
-        LAST_ARP_LEN.load(Ordering::Relaxed),
-        critical_section::with(|cs| LAST_ARP_HEAD.borrow(cs).get()),
-    )
-}
-
-/// `(unicast_seq, unicast_len, unicast_head)`.
-pub fn last_unicast_frame() -> (u32, u32, [u8; 64]) {
-    (
-        UNICAST_FRAME_SEQ.load(Ordering::Relaxed),
-        LAST_UNICAST_LEN.load(Ordering::Relaxed),
-        critical_section::with(|cs| LAST_UNICAST_HEAD.borrow(cs).get()),
-    )
-}
-
 /// Diagnostic snapshot of the ISR counters.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct IrqCounters {
@@ -385,7 +291,6 @@ impl<const RX: usize, const TX: usize, const BUF: usize> RxToken for EmacRxToken
         // the embassy stack.
         let emac = unsafe { &mut *self.emac };
         let len = emac.receive(&mut buffer).ok().flatten().unwrap_or(0);
-        snapshot_rx_frame(&buffer[..len]);
         f(&mut buffer[..len])
     }
 }
@@ -404,7 +309,6 @@ impl<const RX: usize, const TX: usize, const BUF: usize> TxToken for EmacTxToken
         let len = len.min(MAX_FRAME_SIZE);
         let mut buffer = [0u8; MAX_FRAME_SIZE];
         let result = f(&mut buffer[..len]);
-        snapshot_tx_frame(&buffer[..len]);
         // SAFETY: see `EmacRxToken::consume`.
         let emac = unsafe { &mut *self.emac };
         let _ = emac.transmit(&buffer[..len]);
