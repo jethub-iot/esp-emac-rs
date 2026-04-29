@@ -179,6 +179,15 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             return Err(EmacError::AlreadyInitialized);
         }
 
+        // 0. Validate user-configurable pins before touching any
+        //    registers, so a bad `EmacConfig::pins` is rejected loudly
+        //    rather than silently writing to unintended MMIO.
+        if !gpio_matrix::is_valid_smi_pin(self.config.pins.mdc)
+            || !gpio_matrix::is_valid_smi_pin(self.config.pins.mdio)
+        {
+            return Err(EmacError::InvalidConfig);
+        }
+
         // 1. Clock GPIO + APLL (or input pad for external clock).
         self.configure_clock();
 

@@ -3,10 +3,23 @@
 
 //! GPIO Matrix configuration for ESP32 EMAC SMI and RMII signals.
 //!
-//! The SMI signals (MDC, MDIO) are routed through the GPIO Matrix, so any
-//! GPIO can be picked for them. The RMII data pins are *not* routable —
-//! they are pinned to fixed GPIOs (TXD0=19, TXD1=22, TX_EN=21, RXD0=25,
-//! RXD1=26, CRS_DV=27) and must be selected through IO_MUX function 5.
+//! Scope: **original ESP32 (Xtensa LX6) only.** The EMAC peripheral
+//! does not exist on ESP32-S2/S3/C3/C6/H2, so neither does this code
+//! path. All addresses, signal indices and the `iomux_addr_for_gpio`
+//! lookup are hard-wired to the ESP32 memory map; do not assume
+//! portability.
+//!
+//! Why direct register access instead of `esp_hal::gpio` connect APIs:
+//! `esp-hal` 1.x has no `OutputSignal::EmacMdc` / `EmacMdo` /
+//! `InputSignal::EmacMdi` variants — EMAC signals are not in the
+//! enum at all because the peripheral isn't supported in the HAL.
+//! Until that lands upstream, this module is the integration point.
+//!
+//! The SMI signals (MDC, MDIO) are routed through the GPIO Matrix, so
+//! any GPIO with an IO_MUX register can be picked for them. The RMII
+//! data pins are *not* routable — they are pinned to fixed GPIOs
+//! (TXD0=19, TXD1=22, TX_EN=21, RXD0=25, RXD1=26, CRS_DV=27) and must
+//! be selected through IO_MUX function 5.
 //!
 //! Signal table:
 //!
@@ -91,9 +104,30 @@ pub const IO_MUX_FUN_DRV_MASK: u32 = 0x03 << 10;
 /// Route MDC and MDIO through the requested GPIOs via the GPIO Matrix.
 /// Must be called before any MDIO transaction. The default EMAC bring-up
 /// sequence picks these pins from [`crate::config::RmiiPins`].
+///
+/// Out-of-range GPIO numbers are silently ignored (early-return) so a
+/// bad config can't write to unintended MMIO. Callers that want a hard
+/// error should validate via [`is_valid_smi_pin`] first; `Emac::init`
+/// already does so and returns `EmacError::InvalidConfig`.
 pub fn configure_smi_pins(mdc_gpio: u8, mdio_gpio: u8) {
+    if !is_valid_smi_pin(mdc_gpio) || !is_valid_smi_pin(mdio_gpio) {
+        return;
+    }
     configure_mdc(mdc_gpio);
     configure_mdio(mdio_gpio);
+}
+
+/// Returns `true` if `gpio_num` is a valid GPIO for SMI (MDC or MDIO)
+/// routing on ESP32: it must have an IO_MUX register and a physical pad.
+///
+/// Valid range is `0..=23 ∪ 25..=39`. GPIO24 has no pad on any ESP32
+/// package, and there are no GPIOs above 39. GPIO34-39 are input-only,
+/// so they cannot drive MDC and cannot host bidirectional MDIO; a
+/// caller asking for them gets the same `false` here as for an
+/// out-of-range number.
+#[must_use]
+pub const fn is_valid_smi_pin(gpio_num: u8) -> bool {
+    matches!(gpio_num, 0..=23 | 25..=33)
 }
 
 /// Route the six fixed RMII data pins through IO_MUX function 5
@@ -334,6 +368,27 @@ mod tests {
     fn iomux_addr_for_gpio_out_of_range_is_none() {
         assert_eq!(iomux_addr_for_gpio(24), None);
         assert_eq!(iomux_addr_for_gpio(40), None);
+    }
+
+    #[test]
+    fn smi_pin_validation() {
+        // Defaults must be accepted.
+        assert!(is_valid_smi_pin(23));
+        assert!(is_valid_smi_pin(18));
+        // GPIO0 is sometimes used as a strapping pin but technically valid.
+        assert!(is_valid_smi_pin(0));
+        // GPIO24 has no pad on any ESP32 package.
+        assert!(!is_valid_smi_pin(24));
+        // Out-of-range.
+        assert!(!is_valid_smi_pin(40));
+        assert!(!is_valid_smi_pin(255));
+        // GPIO34-39 are input-only on ESP32, so they cannot host
+        // bidirectional MDIO nor drive MDC.
+        assert!(!is_valid_smi_pin(34));
+        assert!(!is_valid_smi_pin(39));
+        // Boundary of the output-capable upper bank.
+        assert!(is_valid_smi_pin(32));
+        assert!(is_valid_smi_pin(33));
     }
 
     #[test]
