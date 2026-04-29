@@ -243,8 +243,10 @@ unsafe fn gpio_output_enable_set(gpio_num: u8) {
 }
 
 /// IO_MUX register address for a given GPIO. Per ESP32 TRM Table 4-3 the
-/// IO_MUX layout is non-sequential, so we have an explicit lookup. Returns
-/// `None` for GPIOs that have no IO_MUX register (e.g. GPIO20 / 24).
+/// IO_MUX layout is non-sequential, so we have an explicit lookup.
+/// Returns `None` for GPIOs that have no IO_MUX register: GPIO24 has no
+/// pad on any ESP32 package, and any number outside the documented
+/// range (above 39) is rejected.
 fn iomux_addr_for_gpio(gpio_num: u8) -> Option<usize> {
     let offset = match gpio_num {
         0 => 0x44,
@@ -321,8 +323,16 @@ mod tests {
     }
 
     #[test]
-    fn iomux_unknown_gpio_returns_none() {
+    fn iomux_addr_for_gpio20_is_known() {
+        // GPIO20 has an IO_MUX register on ESP32 (`IO_MUX_GPIO20_REG` at
+        // `IO_MUX_BASE + 0x78`) even though it has no pad on the standard
+        // QFN packages.
         assert_eq!(iomux_addr_for_gpio(20), Some(0x3FF4_9078));
+    }
+
+    #[test]
+    fn iomux_addr_for_gpio_out_of_range_is_none() {
+        assert_eq!(iomux_addr_for_gpio(24), None);
         assert_eq!(iomux_addr_for_gpio(40), None);
     }
 

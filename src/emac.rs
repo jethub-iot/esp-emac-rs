@@ -474,7 +474,7 @@ pub type EmacSmall = Emac<4, 4, 1600>;
 
 /// Wraps a `&mut DelayNs` so it can be passed by value to APIs that take
 /// an owned `DelayNs` implementor (such as
-/// `ph_esp32_mac::ResetController::with_timeout`).
+/// [`crate::reset::ResetController::with_timeout`]).
 struct BorrowedDelay<'a, D: DelayNs + ?Sized>(&'a mut D);
 
 impl<D: DelayNs + ?Sized> DelayNs for BorrowedDelay<'_, D> {

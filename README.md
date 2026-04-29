@@ -9,8 +9,11 @@ register helpers — no `ph-esp32-mac`, no `esp-idf-svc`, no
 
 Targets the **built-in EMAC** on the original ESP32 (Xtensa, dual-core).
 ESP32-S3 / C6 / H2 don't have an EMAC peripheral; for those use SPI
-Ethernet (e.g. W5500 / ENC28J60). The crate compiles only when the
-target is `xtensa-esp32-none-elf`.
+Ethernet (e.g. W5500 / ENC28J60). The driver is intended to run only
+on ESP32 / Xtensa targets — bare-metal MMIO writes are unconditional
+and assume the ESP32 memory map. Pure register-arithmetic unit tests
+do build and run on the host (`cargo test --target $HOST_TARGET`),
+which is how `regs/*` is exercised in CI.
 
 ## What's in the box
 
