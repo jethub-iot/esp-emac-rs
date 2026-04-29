@@ -265,6 +265,117 @@ pub unsafe fn clear_bits(offset: usize, bits: u32) {
 }
 
 // =============================================================================
+// Composite operations (formerly ph_esp32_mac::unsafe_registers::DmaRegs)
+// =============================================================================
+
+/// Write the DMA Bus Mode register.
+#[inline(always)]
+pub fn set_bus_mode(val: u32) {
+    // SAFETY: DMABUSMODE is a known-valid 32-bit register inside the DMA block.
+    unsafe { write(DMABUSMODE, val) }
+}
+
+/// Read the DMA Operation Mode register.
+#[inline(always)]
+pub fn operation_mode() -> u32 {
+    // SAFETY: DMAOPERATION is a known-valid 32-bit register inside the DMA block.
+    unsafe { read(DMAOPERATION) }
+}
+
+/// Write the DMA Operation Mode register.
+#[inline(always)]
+pub fn set_operation_mode(val: u32) {
+    // SAFETY: DMAOPERATION is a known-valid 32-bit register inside the DMA block.
+    unsafe { write(DMAOPERATION, val) }
+}
+
+/// Mask all DMA interrupts off (`DMAINTENABLE = 0`).
+#[inline(always)]
+pub fn disable_all_interrupts() {
+    // SAFETY: DMAINTENABLE is a known-valid 32-bit register inside the DMA block.
+    unsafe { write(DMAINTENABLE, 0) }
+}
+
+/// Enable the default set of DMA interrupts (TI/RI + AIS/NIS umbrellas + FBE).
+#[inline(always)]
+pub fn enable_default_interrupts() {
+    // SAFETY: DMAINTENABLE is a known-valid 32-bit register inside the DMA block.
+    unsafe { write(DMAINTENABLE, int_enable::DEFAULT) }
+}
+
+/// Write-1-to-clear every flag in `DMASTATUS`.
+#[inline(always)]
+pub fn clear_all_interrupts() {
+    // SAFETY: DMASTATUS is a known-valid 32-bit register; bits are W1C.
+    unsafe { write(DMASTATUS, status::ALL_INTERRUPTS) }
+}
+
+/// Programme the RX descriptor list base (physical) address.
+#[inline(always)]
+pub fn set_rx_desc_list_addr(addr: u32) {
+    // SAFETY: DMARXBASEADDR is a known-valid 32-bit register inside the DMA block.
+    unsafe { write(DMARXBASEADDR, addr) }
+}
+
+/// Programme the TX descriptor list base (physical) address.
+#[inline(always)]
+pub fn set_tx_desc_list_addr(addr: u32) {
+    // SAFETY: DMATXBASEADDR is a known-valid 32-bit register inside the DMA block.
+    unsafe { write(DMATXBASEADDR, addr) }
+}
+
+/// Start the TX DMA process (`DMAOPERATION.ST = 1`).
+#[inline(always)]
+pub fn start_tx() {
+    // SAFETY: DMAOPERATION is a known-valid 32-bit register inside the DMA block.
+    unsafe { set_bits(DMAOPERATION, operation::ST) }
+}
+
+/// Stop the TX DMA process (`DMAOPERATION.ST = 0`).
+#[inline(always)]
+pub fn stop_tx() {
+    // SAFETY: DMAOPERATION is a known-valid 32-bit register inside the DMA block.
+    unsafe { clear_bits(DMAOPERATION, operation::ST) }
+}
+
+/// Start the RX DMA process (`DMAOPERATION.SR = 1`).
+#[inline(always)]
+pub fn start_rx() {
+    // SAFETY: DMAOPERATION is a known-valid 32-bit register inside the DMA block.
+    unsafe { set_bits(DMAOPERATION, operation::SR) }
+}
+
+/// Stop the RX DMA process (`DMAOPERATION.SR = 0`).
+#[inline(always)]
+pub fn stop_rx() {
+    // SAFETY: DMAOPERATION is a known-valid 32-bit register inside the DMA block.
+    unsafe { clear_bits(DMAOPERATION, operation::SR) }
+}
+
+/// Trigger a TX FIFO flush (`DMAOPERATION.FTF = 1`, self-clearing).
+#[inline(always)]
+pub fn flush_tx_fifo() {
+    // SAFETY: DMAOPERATION is a known-valid 32-bit register inside the DMA block.
+    unsafe { set_bits(DMAOPERATION, operation::FTF) }
+}
+
+/// Issue a TX poll demand (write any value to `DMATXPOLLDEMAND`) — wakes the
+/// TX DMA out of the Suspended state when new descriptors are queued.
+#[inline(always)]
+pub fn tx_poll_demand() {
+    // SAFETY: DMATXPOLLDEMAND is a known-valid 32-bit register; the value is ignored.
+    unsafe { write(DMATXPOLLDEMAND, 0) }
+}
+
+/// Issue an RX poll demand (write any value to `DMARXPOLLDEMAND`) — wakes the
+/// RX DMA out of the Suspended state after the CPU returns descriptor ownership.
+#[inline(always)]
+pub fn rx_poll_demand() {
+    // SAFETY: DMARXPOLLDEMAND is a known-valid 32-bit register; the value is ignored.
+    unsafe { write(DMARXPOLLDEMAND, 0) }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 

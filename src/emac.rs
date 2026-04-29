@@ -12,8 +12,9 @@
 
 use embedded_hal::delay::DelayNs;
 
-use ph_esp32_mac::unsafe_registers::{DmaRegs, ResetController};
+use ph_esp32_mac::unsafe_registers::ResetController;
 
+use crate::regs::dma as dma_regs;
 use crate::regs::ext as ext_regs;
 use crate::regs::gpio as gpio_matrix;
 use crate::regs::mac as mac_regs;
@@ -237,16 +238,16 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             | bus_mode::USP
             | bus_mode::ATDS
             | ((pbl << bus_mode::PBL_SHIFT) & bus_mode::PBL_MASK);
-        DmaRegs::set_bus_mode(bus);
-        DmaRegs::set_operation_mode(operation::TSF | operation::RSF);
-        DmaRegs::disable_all_interrupts();
-        DmaRegs::clear_all_interrupts();
+        dma_regs::set_bus_mode(bus);
+        dma_regs::set_operation_mode(operation::TSF | operation::RSF);
+        dma_regs::disable_all_interrupts();
+        dma_regs::clear_all_interrupts();
 
         // 9. Descriptor chains. Returns physical base addresses suitable for
         //    DMARXBASEADDR / DMATXBASEADDR.
         let (rx_base, tx_base) = self.dma.init();
-        DmaRegs::set_rx_desc_list_addr(rx_base);
-        DmaRegs::set_tx_desc_list_addr(tx_base);
+        dma_regs::set_rx_desc_list_addr(rx_base);
+        dma_regs::set_tx_desc_list_addr(tx_base);
 
         // 10. Programme the MAC address into ADDR0H / ADDR0L (with AE bit).
         // The internal filter latch on this Synopsys GMAC fires on the LOW
@@ -269,23 +270,23 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         // Reset descriptor ownership in case of a previous run.
         let (_rx_base, _tx_base) = self.dma.reset();
 
-        DmaRegs::clear_all_interrupts();
-        DmaRegs::enable_default_interrupts();
+        dma_regs::clear_all_interrupts();
+        dma_regs::enable_default_interrupts();
 
         // Enable MAC TX, then DMA TX, DMA RX, then MAC RX (matches the
         // ordering from the ESP32 reference manual / IDF EMAC driver).
         let cfg = mac_regs::config();
         mac_regs::set_config(cfg | config::TX_ENABLE);
 
-        DmaRegs::start_tx();
-        DmaRegs::start_rx();
+        dma_regs::start_tx();
+        dma_regs::start_rx();
 
         let cfg = mac_regs::config();
         mac_regs::set_config(cfg | config::RX_ENABLE);
 
         // Issue an RX poll demand so the DMA does not stay in Suspended
         // state if all descriptors were already CPU-owned.
-        DmaRegs::rx_poll_demand();
+        dma_regs::rx_poll_demand();
 
         self.state = EmacState::Running;
         Ok(())
@@ -298,13 +299,13 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         }
 
         // Stop DMA TX, wait for in-flight data to drain (best effort).
-        DmaRegs::stop_tx();
+        dma_regs::stop_tx();
 
         // Flush TX FIFO and wait for the bit to self-clear.
-        DmaRegs::flush_tx_fifo();
+        dma_regs::flush_tx_fifo();
         let mut waited_us = 0u32;
         while waited_us < TX_FIFO_FLUSH_TIMEOUT_US {
-            if (DmaRegs::operation_mode() & operation::FTF) == 0 {
+            if (dma_regs::operation_mode() & operation::FTF) == 0 {
                 break;
             }
             waited_us += 10;
@@ -314,8 +315,8 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         let cfg = mac_regs::config();
         mac_regs::set_config(cfg & !(config::TX_ENABLE | config::RX_ENABLE));
 
-        DmaRegs::stop_rx();
-        DmaRegs::disable_all_interrupts();
+        dma_regs::stop_rx();
+        dma_regs::disable_all_interrupts();
 
         self.state = EmacState::Initialized;
         Ok(())
@@ -332,7 +333,7 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         }
         let n = self.dma.transmit(data)?;
         // Kick TX DMA out of suspended state if we just refilled descriptors.
-        DmaRegs::tx_poll_demand();
+        dma_regs::tx_poll_demand();
         Ok(n)
     }
 
@@ -345,7 +346,7 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         if result.is_some() {
             // After freeing a descriptor, kick the RX poll demand so the
             // DMA leaves Suspended state.
-            DmaRegs::rx_poll_demand();
+            dma_regs::rx_poll_demand();
         }
         Ok(result)
     }
