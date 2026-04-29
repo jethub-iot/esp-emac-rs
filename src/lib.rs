@@ -3,11 +3,9 @@
 
 //! ESP32 EMAC Ethernet MAC driver.
 //!
-//! Native MAC/DMA bring-up via [`crate::emac::Emac`]. Register helpers
-//! (`MacRegs`, `DmaRegs`, `ExtRegs`, `GpioMatrix`, `ResetController`)
-//! are still imported from [`ph_esp32_mac::unsafe_registers`] in this
-//! phase and will be copied into our own `regs/*` modules in a follow-up
-//! before `ph-esp32-mac` can be dropped as a dependency.
+//! Native MAC/DMA bring-up via [`crate::emac::Emac`] using the local
+//! `regs/*` modules and [`crate::reset::ResetController`]. No
+//! `ph-esp32-mac` dependency at runtime.
 
 #![no_std]
 
@@ -21,6 +19,7 @@ pub mod error;
 pub mod interrupt;
 pub mod mdio;
 pub mod regs;
+pub mod reset;
 
 pub use config::{ClkGpio, EmacConfig, RmiiClockConfig, RmiiPins};
 pub use emac::{Duplex, Emac, EmacDefault, EmacSmall, EmacState, Speed};

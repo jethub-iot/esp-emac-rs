@@ -1,23 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR Apache-2.0
 // Copyright (c) Viacheslav Bocharov <v@baodeep.com> and JetHome (r)
 
-//! Native ESP32 EMAC driver — Phase 3 implementation.
+//! Native ESP32 EMAC driver.
 //!
-//! Owns the DMA engine, drives the bring-up sequence directly via register
-//! helpers, and no longer wraps `ph_esp32_mac::Emac`. This is the staging
-//! point of the migration: register helpers (`MacRegs`, `DmaRegs`,
-//! `ExtRegs`, `GpioMatrix`, `ResetController`) are still imported from
-//! `ph_esp32_mac::unsafe_registers` while we copy them into our own
-//! `regs/*` modules in a follow-up.
+//! Owns the DMA engine and drives the bring-up sequence directly via
+//! the local register helper modules in `crate::regs::*` and
+//! [`crate::reset::ResetController`]. No `ph-esp32-mac` dependency.
 
 use embedded_hal::delay::DelayNs;
-
-use ph_esp32_mac::unsafe_registers::ResetController;
 
 use crate::regs::dma as dma_regs;
 use crate::regs::ext as ext_regs;
 use crate::regs::gpio as gpio_matrix;
 use crate::regs::mac as mac_regs;
+use crate::reset::ResetController;
 
 use crate::config::{ClkGpio, EmacConfig, RmiiClockConfig};
 use crate::dma::engine::DmaEngine;

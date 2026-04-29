@@ -19,12 +19,6 @@ embassy-sync       = { version = "0.7", optional = true }
 critical-section   = { version = "1.2", optional = true }
 defmt              = { version = "0.3", optional = true }
 
-# Phase 3 staging: register helpers (`MacRegs`, `DmaRegs`, `ExtRegs`,
-# `GpioMatrix`, `ResetController`) come from ph-esp32-mac for now.
-# They will be copied into our own `regs/*` modules in a follow-up so
-# we can drop this dependency entirely.
-ph-esp32-mac = { git = "https://github.com/jethome-iot/ph-esp32-mac", branch = "feat/expose-gpio-matrix-and-reset", default-features = false, features = ["esp32", "critical-section"] }
-
 [dev-dependencies]
 critical-section = { version = "1.2", features = ["std"] }
 
@@ -35,4 +29,4 @@ mdio-phy    = ["dep:eth-mdio-phy"]
 # Required for the firmware build; tests run without it.
 esp-hal     = ["dep:esp-hal"]
 embassy-net = ["dep:embassy-net-driver", "dep:embassy-sync", "dep:critical-section"]
-defmt       = ["dep:defmt", "ph-esp32-mac/defmt"]
+defmt       = ["dep:defmt"]
