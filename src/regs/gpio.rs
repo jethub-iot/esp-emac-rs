@@ -88,15 +88,10 @@ pub const IO_MUX_FUN_DRV_MASK: u32 = 0x03 << 10;
 // Public configuration entry points
 // =============================================================================
 
-/// Route MDC (GPIO23) and MDIO (GPIO18) through the GPIO Matrix to the
-/// EMAC SMI pins. Must be called before any MDIO transaction.
-pub fn configure_smi_pins() {
-    configure_mdc(23);
-    configure_mdio(18);
-}
-
-/// Route MDC and MDIO through user-chosen GPIOs.
-pub fn configure_smi_pins_custom(mdc_gpio: u8, mdio_gpio: u8) {
+/// Route MDC and MDIO through the requested GPIOs via the GPIO Matrix.
+/// Must be called before any MDIO transaction. The default EMAC bring-up
+/// sequence picks these pins from [`crate::config::RmiiPins`].
+pub fn configure_smi_pins(mdc_gpio: u8, mdio_gpio: u8) {
     configure_mdc(mdc_gpio);
     configure_mdio(mdio_gpio);
 }

@@ -182,12 +182,12 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         // 1. Clock GPIO + APLL (or input pad for external clock).
         self.configure_clock();
 
-        // 2. Configure SMI pins (MDC=GPIO23, MDIO=GPIO18) and RMII data
-        //    pins (fixed function 5).
+        // 2. Configure SMI pins (MDC/MDIO from `EmacConfig::pins`) and
+        //    RMII data pins (fixed function 5 — not configurable).
         if matches!(self.config.clock, RmiiClockConfig::External { .. }) {
             ext_regs::configure_gpio0_rmii_clock_input();
         }
-        gpio_matrix::configure_smi_pins();
+        gpio_matrix::configure_smi_pins(self.config.pins.mdc, self.config.pins.mdio);
         gpio_matrix::configure_rmii_pins();
 
         // 3. Enable EMAC peripheral clock through DPORT.
