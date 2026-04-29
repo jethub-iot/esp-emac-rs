@@ -56,7 +56,14 @@ impl InterruptStatus {
         }
     }
 
-    /// Encode back to a raw value (for write-1-to-clear).
+    /// Encode back to a raw register value, retaining only the bits
+    /// modeled by this struct.
+    ///
+    /// **Do not use this for write-1-to-clear of `DMASTATUS`** — the
+    /// struct does not represent every W1C flag (e.g. `ERI`, `ETI`,
+    /// `RWT`, `TJT`, `EBE[25:23]`), so a roundtrip silently drops
+    /// them. Use the raw `DMASTATUS` snapshot directly via
+    /// [`crate::Emac::clear_interrupts_raw`] when clearing.
     #[inline]
     #[must_use]
     pub fn to_raw(&self) -> u32 {

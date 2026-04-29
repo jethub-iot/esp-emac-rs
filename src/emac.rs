@@ -398,9 +398,13 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         InterruptStatus::from_raw(raw)
     }
 
-    /// Clear (write-1-to-clear) the given DMA status flags.
-    pub fn clear_interrupts(&self, status: InterruptStatus) {
-        let raw = status.to_raw();
+    /// Clear DMA status flags via write-1-to-clear.
+    ///
+    /// Writes `raw` straight into `DMASTATUS`. Pass the raw register
+    /// snapshot you previously read so every W1C bit (including ones
+    /// not modeled in [`InterruptStatus`] such as `ERI`/`ETI`/`RWT`)
+    /// is acknowledged in a single write.
+    pub fn clear_interrupts_raw(&self, raw: u32) {
         // SAFETY: write to a known-valid memory-mapped register.
         unsafe {
             core::ptr::write_volatile(
@@ -410,17 +414,18 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         }
     }
 
-    /// Convenience: handle the ISR — read status, return parsed copy,
-    /// clear flags. Equivalent to:
-    /// ```ignore
-    /// let s = emac.interrupt_status();
-    /// emac.clear_interrupts(s);
-    /// s
-    /// ```
+    /// Convenience: handle the ISR — read status, clear all flags
+    /// (via the raw snapshot, so unrepresented W1C bits are also
+    /// acknowledged), return the parsed copy.
     pub fn handle_interrupt(&self) -> InterruptStatus {
-        let s = self.interrupt_status();
-        self.clear_interrupts(s);
-        s
+        // SAFETY: read from a known-valid memory-mapped register.
+        let raw = unsafe {
+            core::ptr::read_volatile(
+                (crate::regs::dma::BASE + crate::regs::dma::DMASTATUS) as *const u32,
+            )
+        };
+        self.clear_interrupts_raw(raw);
+        InterruptStatus::from_raw(raw)
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────
