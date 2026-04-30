@@ -188,19 +188,34 @@ impl<const RX: usize, const TX: usize, const BUF: usize> DmaEngine<RX, TX, BUF> 
 
     // ── Reception ─────────────────────────────────────────
 
-    /// Check if a complete received frame is available — including
-    /// multi-descriptor frames where the current descriptor is not
-    /// itself the last one. Equivalent to
-    /// `peek_frame_length().is_some()`.
+    /// Check if there is something for `receive` to do on the current
+    /// descriptor. Returns `true` when:
     ///
-    /// The previous implementation returned `true` only when the
-    /// current descriptor carried the `LAST` bit, which silently
-    /// disagreed with `receive` (which already supports multi-
-    /// descriptor frames) on rings with `BUF < MTU`: the embassy-net
-    /// driver would never wake on a scattered frame even though
-    /// `receive` would happily reassemble it.
+    /// - the current descriptor is CPU-owned and carries an error flag
+    ///   (CRC, overflow, etc.) — `receive` will recycle it as part of
+    ///   its error path, so the driver still needs to be woken; or
+    /// - a complete (possibly multi-descriptor) frame is available, as
+    ///   determined by `peek_frame_length`.
+    ///
+    /// Two earlier implementations both had bugs:
+    /// 1. `!current.is_owned() && current.is_last()` missed multi-
+    ///    descriptor frames whose head wasn't itself `LAST`.
+    /// 2. `peek_frame_length().is_some()` fixed (1) but missed error
+    ///    frames (peek declines to report a length for them), so the
+    ///    embassy-net driver never called `receive` to flush a
+    ///    CRC-failed frame — RX would wedge as the ring filled with
+    ///    untouched error descriptors.
     #[must_use]
     pub fn rx_available(&self) -> bool {
+        let desc = self.rx_ring.current();
+        if desc.is_owned() {
+            return false;
+        }
+        // Errored descriptor still needs draining via `receive` so the
+        // chain doesn't fill up with bad frames; peek would say None.
+        if desc.has_error() {
+            return true;
+        }
         self.peek_frame_length().is_some()
     }
 
@@ -780,6 +795,32 @@ mod tests {
         let frame_len_with_crc = (a.len() + b.len() + 4) as u32;
         let rdes0_val = rdes0::LAST_DESC | (frame_len_with_crc << rdes0::FRAME_LEN_SHIFT);
         engine.rx_ring.get(start + 1).set_raw_rdes0(rdes0_val);
+    }
+
+    #[test]
+    fn rx_available_true_for_errored_frame() {
+        // Regression: switching `rx_available` to `peek_frame_length`
+        // accidentally hid CPU-owned-but-errored descriptors. The
+        // embassy driver gates on `rx_available`, so an errored frame
+        // would never make it to `receive` and the descriptor would
+        // sit unrecycled until something else drained the chain.
+        let mut engine: DmaEngine<4, 4, 256> = DmaEngine::new();
+        let _ = engine.init();
+
+        // Mark desc[0] as CPU-owned with the ERR_SUMMARY bit set,
+        // FIRST + LAST so it could be a complete (but broken) frame.
+        let rdes0_val = rdes0::FIRST_DESC | rdes0::LAST_DESC | rdes0::ERR_SUMMARY | rdes0::CRC_ERR;
+        engine.rx_ring.get(0).set_raw_rdes0(rdes0_val);
+
+        // peek_frame_length still returns None for errored descriptors
+        // — that's intentional, callers shouldn't get a length back.
+        assert_eq!(engine.peek_frame_length(), None);
+        // …but rx_available must say "yes, drain me" so the driver
+        // wakes up and lets `receive` recycle the descriptor.
+        assert!(
+            engine.rx_available(),
+            "rx_available must signal errored frames so receive can flush them"
+        );
     }
 
     #[test]
