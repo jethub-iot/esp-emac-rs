@@ -29,21 +29,13 @@ pub const DPORT_WIFI_CLK_EN_REG: usize = 0x3FF0_00CC;
 pub const DPORT_WIFI_CLK_EMAC_EN: u32 = 1 << 14;
 
 // =============================================================================
-// IO_MUX constants (for GPIO0 RMII clock input)
+// IO_MUX
 // =============================================================================
 
-/// IO_MUX base address (ESP32).
+/// IO_MUX base address (ESP32). Re-exported here for the cross-module
+/// consistency test in `crate::clock`; the bit-field constants live in
+/// `crate::regs::gpio` where the GPIO Matrix routing actually uses them.
 pub const IO_MUX_BASE: usize = 0x3FF4_9000;
-/// IO_MUX GPIO0 register offset.
-pub const IO_MUX_GPIO0_OFFSET: usize = 0x44;
-/// IO_MUX FUN_IE bit (input enable) — bit 9.
-pub const IO_MUX_FUN_IE: u32 = 1 << 9;
-/// IO_MUX MCU_SEL field shift — bits 14:12.
-pub const IO_MUX_MCU_SEL_SHIFT: u32 = 12;
-/// IO_MUX MCU_SEL field mask (3 bits).
-pub const IO_MUX_MCU_SEL_MASK: u32 = 0x07 << 12;
-/// EMAC_TX_CLK function for GPIO0 (function 5, used as RMII ref clock input).
-pub const IO_MUX_GPIO0_FUNC_EMAC_TX_CLK: u32 = 5;
 
 // =============================================================================
 // Register Offsets
@@ -195,6 +187,102 @@ pub unsafe fn clear_bits(offset: usize, bits: u32) {
 }
 
 // =============================================================================
+// Composite operations (formerly ph_esp32_mac::unsafe_registers::ExtRegs)
+// =============================================================================
+
+/// Enable the EMAC peripheral clock through the DPORT block.
+///
+/// MUST precede any access to the EMAC register blocks themselves —
+/// `regs::mac` (`EMAC_MAC` base), `regs::dma` (`EMAC_DMA` base), and
+/// the EMAC extension registers in this module above the `Composite
+/// operations` section (`EX_CLK_CTRL`, `EX_PHYINF_CONF`, `EX_PD_SEL`,
+/// …). Reads from those return garbage and writes are silently
+/// dropped while the peripheral is unclocked.
+///
+/// Bring-up steps that touch *other* always-on blocks (RTC analog +
+/// ROM I2C for APLL programming, IO_MUX, GPIO Matrix routing) work
+/// before this call — they don't depend on the EMAC peripheral clock.
+/// See `Emac::init` for the canonical ordering.
+#[inline(always)]
+pub fn enable_peripheral_clock() {
+    // SAFETY: DPORT_WIFI_CLK_EN_REG is a known-valid 32-bit register.
+    unsafe {
+        let cur = core::ptr::read_volatile(DPORT_WIFI_CLK_EN_REG as *const u32);
+        core::ptr::write_volatile(
+            DPORT_WIFI_CLK_EN_REG as *mut u32,
+            cur | DPORT_WIFI_CLK_EMAC_EN,
+        );
+    }
+}
+
+/// Enable the EMAC extension clocks (MII RX / MII TX / EMAC clock).
+/// `enable_peripheral_clock()` must already have been called.
+#[inline(always)]
+pub fn enable_clocks() {
+    // SAFETY: EX_CLK_CTRL is a known-valid 32-bit register inside the EXT block.
+    unsafe {
+        set_bits(
+            EX_CLK_CTRL,
+            clk_ctrl::MII_CLK_RX_EN | clk_ctrl::MII_CLK_TX_EN | clk_ctrl::CLK_EN,
+        );
+    }
+}
+
+/// Switch the PHY interface to RMII (`phy_intf_sel = 4`).
+#[inline(always)]
+pub fn set_rmii_mode() {
+    // SAFETY: EX_PHYINF_CONF is a known-valid 32-bit register inside the EXT block.
+    unsafe {
+        let cur = read(EX_PHYINF_CONF);
+        let new_val = (cur & !phyinf_conf::PHY_INTF_SEL_MASK)
+            | (phyinf_conf::PHY_INTF_RMII << phyinf_conf::PHY_INTF_SEL_SHIFT);
+        write(EX_PHYINF_CONF, new_val);
+    }
+}
+
+/// Configure the EMAC clock for an external 50 MHz oscillator on GPIO0:
+/// `EX_CLK_CTRL.ext_en = 1, int_en = 0`; `EX_OSCCLK_CONF.clk_sel = 1`.
+#[inline(always)]
+pub fn set_rmii_clock_external() {
+    // SAFETY: both registers are known-valid 32-bit registers inside the EXT block.
+    unsafe {
+        let ctrl = read(EX_CLK_CTRL);
+        write(EX_CLK_CTRL, (ctrl | clk_ctrl::EXT_EN) & !clk_ctrl::INT_EN);
+        let osc = read(EX_OSCCLK_CONF);
+        write(EX_OSCCLK_CONF, osc | oscclk_conf::CLK_SEL);
+    }
+}
+
+/// Configure the EMAC clock for the internal APLL source:
+/// `EX_CLK_CTRL.int_en = 1, ext_en = 0`; `EX_OSCCLK_CONF.clk_sel = 0`;
+/// clear `EX_CLKOUT_CONF.div_num` and `h_div_num`.
+#[inline(always)]
+pub fn set_rmii_clock_internal() {
+    // SAFETY: all three registers are known-valid 32-bit registers inside the EXT block.
+    unsafe {
+        let ctrl = read(EX_CLK_CTRL);
+        write(EX_CLK_CTRL, (ctrl | clk_ctrl::INT_EN) & !clk_ctrl::EXT_EN);
+        let osc = read(EX_OSCCLK_CONF);
+        write(EX_OSCCLK_CONF, osc & !oscclk_conf::CLK_SEL);
+        let clkout = read(EX_CLKOUT_CONF);
+        write(
+            EX_CLKOUT_CONF,
+            clkout & !(clkout_conf::DIV_NUM_MASK | clkout_conf::H_DIV_NUM_MASK),
+        );
+    }
+}
+
+/// Power up the EMAC's internal RAM (`EX_PD_SEL.ram_pd = 0`).
+#[inline(always)]
+pub fn power_up_ram() {
+    // SAFETY: EX_PD_SEL is a known-valid 32-bit register inside the EXT block.
+    unsafe {
+        let cur = read(EX_PD_SEL);
+        write(EX_PD_SEL, cur & !pd_sel::RAM_PD_EN_MASK);
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -261,12 +349,6 @@ mod tests {
         // Bit 14 in the DPORT WIFI_CLK_EN register
         assert_eq!(DPORT_WIFI_CLK_EMAC_EN, 1 << 14);
         assert_eq!(DPORT_WIFI_CLK_EMAC_EN, 0x4000);
-    }
-
-    #[test]
-    fn io_mux_gpio0_func_emac_tx_clk_fits_mcu_sel() {
-        // Function 5 must fit in the 3-bit MCU_SEL field
-        assert!(IO_MUX_GPIO0_FUNC_EMAC_TX_CLK < 8);
     }
 
     #[test]

@@ -1,147 +1,162 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR Apache-2.0
 // Copyright (c) Viacheslav Bocharov <v@baodeep.com> and JetHome (r)
 
-//! Embassy-net driver integration for ESP32 EMAC.
+//! Native embassy-net driver for the ESP32 EMAC.
 //!
-//! This module provides an [`embassy_net_driver::Driver`] implementation
-//! that wraps the EMAC, allowing it to be used with the `embassy-net`
-//! TCP/IP stack.
-//!
-//! The entire module is gated behind the `embassy-net` Cargo feature.
+//! Wraps [`crate::Emac`] directly (no `ph_esp32_mac::EmbassyEmac` proxy).
+//! [`EmacDriverState`] holds the wakers, link cache, and ISR counters
+//! and is intended to live in `static` storage so the EMAC ISR can
+//! reach it.
 //!
 //! # Usage
 //!
+//! The driver is non-functional until the EMAC ISR services
+//! `DMASTATUS` and wakes the RX/TX tasks. The ISR body must call
+//! [`EmacDriverState::handle_emac_interrupt`] (or the lower-level
+//! pair [`crate::Emac::handle_interrupt`] +
+//! [`EmacDriverState::on_interrupt_status`]) — without that, RX and
+//! TX block forever in `Driver::receive` / `Driver::transmit` waiting
+//! on wakers that nothing pokes.
+//!
 //! ```ignore
-//! use embassy_net::{Config, Stack, StackResources};
-//! use embassy_net_driver::LinkState;
-//! use esp_emac::{Emac, EmacConfig};
-//! use esp_emac::embassy::{EmacDriver, EmacDriverState};
-//! use static_cell::StaticCell;
+//! use esp_emac::{
+//!     Emac, EmacConfig, RmiiClockConfig, RmiiPins, ClkGpio, XtalFreq,
+//!     embassy::{EmacDriver, EmacDriverState},
+//! };
+//! use esp_hal::interrupt::{InterruptHandler, Priority};
 //!
-//! static mut EMAC: Emac<10, 10, 1600> = Emac::new(EmacConfig::default());
+//! static mut EMAC: Emac<10, 10, 1600> = Emac::new(EmacConfig {
+//!     clock: RmiiClockConfig::InternalApll {
+//!         gpio: ClkGpio::Gpio17,
+//!         xtal: XtalFreq::Mhz40,
+//!     },
+//!     pins: RmiiPins { mdc: 23, mdio: 18 },
+//! });
 //! static EMAC_STATE: EmacDriverState = EmacDriverState::new();
-//! static RESOURCES: StaticCell<StackResources<4>> = StaticCell::new();
 //!
-//! // Initialize EMAC first (GPIO/clock/PHY setup omitted).
-//! let emac = unsafe { &mut EMAC };
-//! emac.init().unwrap();
-//! emac.enable();
+//! // 1. ISR — must service DMASTATUS and wake stack tasks.
+//! #[esp_hal::handler(priority = Priority::Priority1)]
+//! fn emac_isr() {
+//!     EMAC_STATE.handle_emac_interrupt();
+//! }
 //!
+//! // 2. Bring-up + driver wiring.
+//! # fn example() -> Result<(), esp_emac::EmacError> {
+//! # let mut delay = esp_hal::delay::Delay::new();
+//! let emac = unsafe { &mut *core::ptr::addr_of_mut!(EMAC) };
+//! emac.set_mac_address([0x00, 0x70, 0x07, 0x24, 0x3B, 0x87]);
+//! emac.init(&mut delay)?;
+//! // ... PHY init + link wait + set_speed/set_duplex omitted ...
+//! emac.bind_interrupt(InterruptHandler::new(emac_isr, Priority::Priority1));
+//! emac.start()?;
 //! let driver = EmacDriver::new(emac, &EMAC_STATE);
-//! let config = Config::dhcpv4(Default::default());
-//! let seed = 0x1234_5678_9ABC_DEF0;
-//! let (stack, runner) = embassy_net::new(
-//!     driver,
-//!     config,
-//!     RESOURCES.init(StackResources::new()),
-//!     seed,
-//! );
-//!
-//! // In your EMAC interrupt handler:
-//! // EMAC_STATE.on_interrupt();
+//! // Hand `driver` to embassy_net::new() / Stack.
+//! # Ok(()) }
 //! ```
-//!
-//! # Interrupt Handling
-//!
-//! Call [`EmacDriverState::on_interrupt`] from the EMAC ISR to wake
-//! async tasks waiting on RX/TX readiness.
-//!
-//! # Link State Updates
-//!
-//! Call [`EmacDriverState::set_link_up`] or [`EmacDriverState::set_link_down`]
-//! from a periodic PHY polling task. The driver reports link state to
-//! `embassy-net`, which controls DHCP and routing accordingly.
 
-use core::cell::{Cell, RefCell};
+use core::cell::Cell;
 use core::marker::PhantomData;
+use core::sync::atomic::{AtomicU32, Ordering};
 use core::task::Context;
 
 use critical_section::Mutex;
 use embassy_net_driver::{
     Capabilities, ChecksumCapabilities, Driver, HardwareAddress, LinkState, RxToken, TxToken,
 };
+use embassy_sync::waitqueue::AtomicWaker;
 
 use crate::emac::Emac;
+use crate::interrupt::InterruptStatus;
 
-// =============================================================================
-// Constants
-// =============================================================================
+/// Diagnostic snapshot of the `Driver::receive` / `Driver::transmit`
+/// path: how many times embassy-net asked for a token, how many of
+/// those calls actually had a frame, and how many frames the tokens
+/// failed to push to / pull from the EMAC.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DriverCounters {
+    /// Calls to `Driver::receive`.
+    pub rx_calls: u32,
+    /// Calls that returned a non-empty token pair (frame available).
+    pub rx_some: u32,
+    /// Frames silently dropped in `EmacRxToken::consume` because the
+    /// underlying `Emac::receive` returned `Err(_)` or `Ok(None)` after
+    /// the driver had already handed out a token. Indicates either an
+    /// errored frame (CRC, oversize) or a race where another path
+    /// consumed the descriptor first.
+    pub rx_dropped: u32,
+    /// Calls to `Driver::transmit`.
+    pub tx_calls: u32,
+    /// Calls that returned a token (TX path was ready).
+    pub tx_some: u32,
+    /// Frames silently dropped in `EmacTxToken::consume` because
+    /// `Emac::transmit` returned `Err(_)` after the driver had already
+    /// handed out a token. Typical cause: descriptor ring exhausted
+    /// between the readiness check and the actual push.
+    pub tx_dropped: u32,
+}
 
-/// Ethernet MTU (IP MTU + Ethernet header, excluding FCS).
-///
-/// Standard Ethernet frame: 1500 (IP) + 14 (header) = 1514 bytes.
-/// embassy-net `max_transmission_unit` uses this value.
-const ETHERNET_MTU: usize = 1514;
+/// Diagnostic snapshot of the ISR counters.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IrqCounters {
+    /// Total number of times the ISR ran.
+    pub total: u32,
+    /// `RI` (rx_complete) flag observed.
+    pub ri: u32,
+    /// `RU` (rx_buf_unavailable) flag observed.
+    pub ru: u32,
+    /// `TI` (tx_complete) flag observed.
+    pub ti: u32,
+    /// `TU` (tx_buf_unavailable) flag observed.
+    pub tu: u32,
+    /// `ERI` (early receive) flag observed.
+    pub eri: u32,
+    /// At least one error flag observed (UNF/OVF/FBI).
+    pub err: u32,
+    /// Last raw `DMASTATUS` snapshot taken in the ISR (before W1C).
+    pub last_dmastat: u32,
+}
 
-/// Maximum frame size for stack-allocated receive/transmit buffers.
-///
-/// Slightly larger than MTU to accommodate any padding.
+/// Maximum frame size for stack-allocated copy buffers (Ethernet MTU + headers).
 const MAX_FRAME_SIZE: usize = 1600;
 
+/// Standard Ethernet MTU (IP MTU + L2 header). Upper bound on the value
+/// the driver advertises to embassy-net — see
+/// `EmacDriver::effective_mtu` for the per-instance value, which caps
+/// this against the physical TX ring capacity.
+const ETH_MTU: usize = 1514;
+
 // =============================================================================
-// Waker primitive (critical-section based)
+// Driver state
 // =============================================================================
 
-/// Interrupt-safe waker storage.
+/// Shared state for the embassy-net driver.
 ///
-/// Uses `critical_section::Mutex<RefCell<..>>` for ISR+task safety.
-struct AtomicWaker {
-    inner: Mutex<RefCell<Option<core::task::Waker>>>,
-}
-
-impl AtomicWaker {
-    /// Create a new empty waker.
-    const fn new() -> Self {
-        Self {
-            inner: Mutex::new(RefCell::new(None)),
-        }
-    }
-
-    /// Register a waker (called from async poll context).
-    fn register(&self, waker: &core::task::Waker) {
-        critical_section::with(|cs| {
-            let mut slot = self.inner.borrow_ref_mut(cs);
-            match &*slot {
-                Some(existing) if existing.will_wake(waker) => {}
-                _ => *slot = Some(waker.clone()),
-            }
-        });
-    }
-
-    /// Wake and clear the stored waker (safe to call from ISR).
-    fn wake(&self) {
-        let waker = critical_section::with(|cs| self.inner.borrow_ref_mut(cs).take());
-        if let Some(w) = waker {
-            w.wake();
-        }
-    }
-
-    /// Check if a waker is currently registered (test helper).
-    #[cfg(test)]
-    fn is_registered(&self) -> bool {
-        critical_section::with(|cs| self.inner.borrow_ref(cs).is_some())
-    }
-}
-
-// SAFETY: All access goes through critical sections.
-unsafe impl Send for AtomicWaker {}
-// SAFETY: All access goes through critical sections.
-unsafe impl Sync for AtomicWaker {}
-
-// =============================================================================
-// Embassy Driver State
-// =============================================================================
-
-/// Shared state for the embassy-net EMAC driver.
-///
-/// Stores wakers for RX, TX, and link state notifications.
-/// Must be placed in a `static` so it is accessible from interrupt
-/// handlers and async tasks.
+/// Holds the RX, TX, and link wakers plus the cached link state. Place
+/// in a `static` so it can be reached from the EMAC ISR.
 pub struct EmacDriverState {
     rx_waker: AtomicWaker,
     tx_waker: AtomicWaker,
     link_waker: AtomicWaker,
-    link_up: Mutex<Cell<bool>>,
+    link_state: Mutex<Cell<LinkState>>,
+    /// Diagnostic counters — incremented in the ISR. Used by the dev-log
+    /// hypotheses H6/H7.
+    irq_count: AtomicU32,
+    irq_ri: AtomicU32,
+    irq_ru: AtomicU32,
+    irq_ti: AtomicU32,
+    irq_tu: AtomicU32,
+    irq_eri: AtomicU32,
+    irq_err: AtomicU32,
+    /// Last observed raw DMASTAT (snapshot taken in ISR, before W1C).
+    last_dmastat: AtomicU32,
+    /// Counters bumped by [`EmacDriver::receive`] / [`EmacDriver::transmit`]
+    /// to see how often embassy-net actually pulls data.
+    drv_rx_calls: AtomicU32,
+    drv_rx_some: AtomicU32,
+    drv_rx_dropped: AtomicU32,
+    drv_tx_calls: AtomicU32,
+    drv_tx_some: AtomicU32,
+    drv_tx_dropped: AtomicU32,
 }
 
 impl Default for EmacDriverState {
@@ -151,124 +166,254 @@ impl Default for EmacDriverState {
 }
 
 impl EmacDriverState {
-    /// Create a new driver state with link down.
+    /// Create a new state with link initially down.
     pub const fn new() -> Self {
         Self {
             rx_waker: AtomicWaker::new(),
             tx_waker: AtomicWaker::new(),
             link_waker: AtomicWaker::new(),
-            link_up: Mutex::new(Cell::new(false)),
+            link_state: Mutex::new(Cell::new(LinkState::Down)),
+            irq_count: AtomicU32::new(0),
+            irq_ri: AtomicU32::new(0),
+            irq_ru: AtomicU32::new(0),
+            irq_ti: AtomicU32::new(0),
+            irq_tu: AtomicU32::new(0),
+            irq_eri: AtomicU32::new(0),
+            irq_err: AtomicU32::new(0),
+            last_dmastat: AtomicU32::new(0),
+            drv_rx_calls: AtomicU32::new(0),
+            drv_rx_some: AtomicU32::new(0),
+            drv_rx_dropped: AtomicU32::new(0),
+            drv_tx_calls: AtomicU32::new(0),
+            drv_tx_some: AtomicU32::new(0),
+            drv_tx_dropped: AtomicU32::new(0),
         }
     }
 
-    /// Get the current link state.
+    /// Diagnostic counters from the ISR.
+    pub fn irq_counters(&self) -> IrqCounters {
+        IrqCounters {
+            total: self.irq_count.load(Ordering::Relaxed),
+            ri: self.irq_ri.load(Ordering::Relaxed),
+            ru: self.irq_ru.load(Ordering::Relaxed),
+            ti: self.irq_ti.load(Ordering::Relaxed),
+            tu: self.irq_tu.load(Ordering::Relaxed),
+            eri: self.irq_eri.load(Ordering::Relaxed),
+            err: self.irq_err.load(Ordering::Relaxed),
+            last_dmastat: self.last_dmastat.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Diagnostic counters from `Driver::receive` / `Driver::transmit`
+    /// and the matching tokens.
+    pub fn driver_counters(&self) -> DriverCounters {
+        DriverCounters {
+            rx_calls: self.drv_rx_calls.load(Ordering::Relaxed),
+            rx_some: self.drv_rx_some.load(Ordering::Relaxed),
+            rx_dropped: self.drv_rx_dropped.load(Ordering::Relaxed),
+            tx_calls: self.drv_tx_calls.load(Ordering::Relaxed),
+            tx_some: self.drv_tx_some.load(Ordering::Relaxed),
+            tx_dropped: self.drv_tx_dropped.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Read the cached link state.
     pub fn link_state(&self) -> LinkState {
-        let up = critical_section::with(|cs| self.link_up.borrow(cs).get());
-        if up {
-            LinkState::Up
-        } else {
-            LinkState::Down
-        }
+        critical_section::with(|cs| self.link_state.borrow(cs).get())
     }
 
-    /// Set the link state to up and wake any waiters.
+    /// Update the cached link state and wake stack tasks.
+    pub fn set_link_state(&self, state: LinkState) {
+        critical_section::with(|cs| self.link_state.borrow(cs).set(state));
+        self.link_waker.wake();
+    }
+
+    /// Mark the link as up and wake the stack.
     pub fn set_link_up(&self) {
-        critical_section::with(|cs| self.link_up.borrow(cs).set(true));
-        self.link_waker.wake();
+        self.set_link_state(LinkState::Up);
     }
 
-    /// Set the link state to down and wake any waiters.
+    /// Mark the link as down and wake the stack.
     pub fn set_link_down(&self) {
-        critical_section::with(|cs| self.link_up.borrow(cs).set(false));
-        self.link_waker.wake();
+        self.set_link_state(LinkState::Down);
     }
 
-    /// Handle an EMAC interrupt.
-    ///
-    /// Reads the DMA status register, wakes the appropriate async tasks,
-    /// and clears the handled interrupt flags.
-    ///
-    /// Call this from the EMAC ISR.
-    pub fn on_interrupt(&self) {
-        // SAFETY: This reads/writes MMIO registers. The caller is
-        // responsible for ensuring the EMAC peripheral clock is enabled.
-        let status = unsafe { crate::regs::dma::read(crate::regs::dma::DMASTATUS) };
-
-        // Wake RX task on receive-complete or receive-buffer-unavailable.
-        if status & (crate::regs::dma::status::RI | crate::regs::dma::status::RU) != 0 {
+    /// Wake RX/TX tasks based on a snapshot of the DMA interrupt status.
+    pub fn on_interrupt_status(&self, status: InterruptStatus) {
+        if status.rx_complete || status.rx_buf_unavailable {
             self.rx_waker.wake();
         }
-
-        // Wake TX task on transmit-complete or transmit-buffer-unavailable.
-        if status & (crate::regs::dma::status::TI | crate::regs::dma::status::TU) != 0 {
+        if status.tx_complete || status.tx_buf_unavailable {
             self.tx_waker.wake();
         }
-
-        // On fatal bus error, wake both sides.
-        if status & crate::regs::dma::status::FBI != 0 {
+        if status.has_error() {
             self.rx_waker.wake();
             self.tx_waker.wake();
         }
+    }
 
-        // Clear handled interrupt flags (write-1-to-clear).
-        // SAFETY: Same MMIO safety as the read above.
+    /// Read the DMA status register, clear the interrupts, and wake
+    /// any tasks waiting on RX or TX.
+    ///
+    /// Does **not** wake `link_waker` — link state isn't reflected in
+    /// `DMASTATUS` and is updated separately by whatever PHY-polling
+    /// task calls [`set_link_up`](Self::set_link_up) /
+    /// [`set_link_down`](Self::set_link_down). That path takes care
+    /// of waking link-state observers itself.
+    ///
+    /// Intended to be called from the EMAC ISR. Touches only memory-
+    /// mapped EMAC registers and the embedded wakers, so there is no
+    /// aliasing concern with the [`EmacDriver`] holding a raw pointer
+    /// to the [`Emac`] state.
+    pub fn handle_emac_interrupt(&self) {
+        let dmastat = crate::regs::dma::BASE + crate::regs::dma::DMASTATUS;
+        // SAFETY: DMASTATUS is a known-valid 32-bit memory-mapped register.
+        let raw = unsafe { core::ptr::read_volatile(dmastat as *const u32) };
+        let status = InterruptStatus::from_raw(raw);
+        // Write-1-to-clear using the raw snapshot, masked against
+        // `ALL_INTERRUPTS` so only the W1C interrupt bits are written
+        // back. This still catches every asserted W1C bit — including
+        // ones outside `InterruptStatus` such as `ERI` (bit 14), `ETI`
+        // (bit 10), `RWT` (bit 9), `TJT` (bit 3) — but excludes the
+        // read-only fields (`RS`/`TS`/`EB`/`MMC`/`PMT`/`TTI`) so we
+        // never write garbage at addresses the hardware doesn't expect.
+        // Round-tripping through `to_raw()` would silently drop those
+        // bits and risk an interrupt storm.
+        // SAFETY: same address; masked write hits only W1C bits.
         unsafe {
-            crate::regs::dma::write(crate::regs::dma::DMASTATUS, status);
+            core::ptr::write_volatile(
+                dmastat as *mut u32,
+                raw & crate::regs::dma::status::ALL_INTERRUPTS,
+            )
+        };
+
+        self.irq_count.fetch_add(1, Ordering::Relaxed);
+        self.last_dmastat.store(raw, Ordering::Relaxed);
+        if status.rx_complete {
+            self.irq_ri.fetch_add(1, Ordering::Relaxed);
         }
+        if status.rx_buf_unavailable {
+            self.irq_ru.fetch_add(1, Ordering::Relaxed);
+        }
+        if status.tx_complete {
+            self.irq_ti.fetch_add(1, Ordering::Relaxed);
+        }
+        if status.tx_buf_unavailable {
+            self.irq_tu.fetch_add(1, Ordering::Relaxed);
+        }
+        // Early Receive Interrupt (ERI, bit 14 of DMASTATUS — distinct
+        // from ETI, the Early Transmit Interrupt at bit 10) isn't
+        // surfaced through `InterruptStatus`, so check the raw flag
+        // against the canonical `regs::dma::status::ERI` constant
+        // rather than a magic shift.
+        if (raw & crate::regs::dma::status::ERI) != 0 {
+            self.irq_eri.fetch_add(1, Ordering::Relaxed);
+        }
+        if status.has_error() {
+            self.irq_err.fetch_add(1, Ordering::Relaxed);
+        }
+
+        self.on_interrupt_status(status);
     }
 }
 
-// SAFETY: All fields use critical-section-protected types.
-unsafe impl Send for EmacDriverState {}
-// SAFETY: All fields use critical-section-protected types.
-unsafe impl Sync for EmacDriverState {}
-
 // =============================================================================
-// Embassy Driver Wrapper
+// Driver wrapper
 // =============================================================================
 
-/// Embassy-net driver for the ESP32 EMAC.
+/// embassy-net driver for the ESP32 EMAC.
 ///
-/// Wraps a mutable reference to [`Emac`] and shared [`EmacDriverState`].
-/// Implements [`embassy_net_driver::Driver`] for use with `embassy-net`.
+/// The driver holds a raw pointer to a previously-initialized
+/// [`Emac`] together with a reference to a shared [`EmacDriverState`].
+///
+/// # Safety
+///
+/// The pointer is dereferenced in `Driver` impl methods. The lifetime
+/// `'d` ensures the underlying `Emac` outlives the driver, but the raw
+/// pointer means **mutable aliasing** would be unsound. Construct only
+/// one driver per `Emac` instance and let it own access until shutdown.
 pub struct EmacDriver<'d, const RX: usize, const TX: usize, const BUF: usize> {
     emac: *mut Emac<RX, TX, BUF>,
     state: &'d EmacDriverState,
     _marker: PhantomData<&'d mut Emac<RX, TX, BUF>>,
 }
 
+// SAFETY contract for `unsafe impl Send`:
+//
+// `EmacDriver` carries a `*mut Emac<...>` (raw pointers are not auto-Send),
+// but the manual impl is sound under the following invariants — break any
+// one of them and the impl becomes unsound, so revisit it together with
+// any change that touches `Emac`'s field layout or the ISR data path:
+//
+// 1. Single ownership. Exactly one `EmacDriver` exists per `Emac`
+//    instance for the lifetime of `'d`. `EmacDriver::new` consumes a
+//    `&'d mut Emac<...>`, which the borrow checker enforces as long
+//    as the pointer isn't laundered through other unsafe code.
+// 2. ISR-side access through `EmacDriverState` only touches MMIO
+//    (`DMASTATUS`) and `AtomicU32` counters — *not* the `Emac` struct
+//    behind the raw pointer. So the ISR is not a concurrent reader
+//    of the data the `Driver` impl mutates.
+// 3. The pointee `Emac<RX, TX, BUF>` is itself `Send`. The raw pointer
+//    hides auto-trait inference, so without an explicit bound a
+//    future `Cell<X>` / `Rc<X>` / `MutexGuard<'_, X>` inside `Emac`
+//    would silently leave this impl claiming `Send`. The
+//    `where Emac<RX, TX, BUF>: Send` clause below promotes that
+//    invariant from documentation to a compile-time check: such a
+//    refactor will fail to compile here instead of producing
+//    unsound `EmacDriver: Send`.
+unsafe impl<const RX: usize, const TX: usize, const BUF: usize> Send for EmacDriver<'_, RX, TX, BUF> where
+    Emac<RX, TX, BUF>: Send
+{
+}
+
 impl<'d, const RX: usize, const TX: usize, const BUF: usize> EmacDriver<'d, RX, TX, BUF> {
     /// Create a new embassy-net driver.
     ///
-    /// # Arguments
-    ///
-    /// * `emac` - Initialized EMAC (must be in its final memory location)
-    /// * `state` - Shared driver state (typically a `static`)
+    /// `emac` must be already initialized and started; `state` must be
+    /// the same instance whose [`on_interrupt_status`] is called from
+    /// the EMAC ISR.
     pub fn new(emac: &'d mut Emac<RX, TX, BUF>, state: &'d EmacDriverState) -> Self {
         Self {
-            emac: emac as *mut Emac<RX, TX, BUF>,
+            emac: emac as *mut _,
             state,
             _marker: PhantomData,
         }
     }
 
-    /// Get a reference to the shared driver state.
+    /// Borrow the shared state.
     pub fn state(&self) -> &EmacDriverState {
         self.state
+    }
+
+    /// Effective MTU advertised to embassy-net and used as the
+    /// readiness threshold in `Driver::transmit`.
+    ///
+    /// Capped by the physical TX ring capacity (`TX * BUF`) so the
+    /// driver never advertises — and never gates on — a frame size
+    /// the engine couldn't actually push. On normal rings (e.g.
+    /// `TX=10, BUF=1600`) this returns the standard Ethernet MTU
+    /// of `1514`. On undersized rings (`TX * BUF < 1514`) it shrinks
+    /// to `TX * BUF`, so small frames still flow even though full-MTU
+    /// frames are physically impossible.
+    pub const fn effective_mtu() -> usize {
+        let ring_capacity = TX * BUF;
+        if ring_capacity < ETH_MTU {
+            ring_capacity
+        } else {
+            ETH_MTU
+        }
     }
 }
 
 // =============================================================================
-// RX / TX Tokens
+// RX / TX tokens
 // =============================================================================
 
-/// Receive token for a single packet.
-///
-/// Created by [`EmacDriver::receive`] and consumed by the embassy-net
-/// stack to read one frame.
-pub struct EmacRxToken<'d, const RX: usize, const TX: usize, const BUF: usize> {
+/// embassy-net RX token — copies one received frame on `consume`.
+pub struct EmacRxToken<'a, const RX: usize, const TX: usize, const BUF: usize> {
     emac: *mut Emac<RX, TX, BUF>,
-    _marker: PhantomData<&'d mut Emac<RX, TX, BUF>>,
+    state: &'a EmacDriverState,
+    _marker: PhantomData<&'a mut Emac<RX, TX, BUF>>,
 }
 
 impl<const RX: usize, const TX: usize, const BUF: usize> RxToken for EmacRxToken<'_, RX, TX, BUF> {
@@ -277,27 +422,30 @@ impl<const RX: usize, const TX: usize, const BUF: usize> RxToken for EmacRxToken
         F: FnOnce(&mut [u8]) -> R,
     {
         let mut buffer = [0u8; MAX_FRAME_SIZE];
-
-        // SAFETY: The raw pointer is valid for the driver lifetime.
-        // Tokens are created and consumed within a single poll cycle
-        // by the embassy-net stack.
+        // SAFETY: `EmacDriver` guarantees the pointer is valid for the
+        // lifetime tracked by `'a`; tokens are consumed synchronously by
+        // the embassy stack.
         let emac = unsafe { &mut *self.emac };
-
-        let len = match emac.receive(&mut buffer) {
-            Ok(Some(n)) => n,
-            _ => 0,
-        };
-        f(&mut buffer[..len])
+        match emac.receive(&mut buffer) {
+            Ok(Some(n)) => f(&mut buffer[..n]),
+            // No frame after we already handed out a token — either an
+            // error path (FrameError, BufferTooSmall: descriptor was
+            // recycled by the engine) or a race where another caller
+            // consumed it. Bump `rx_dropped` so the drop is observable
+            // and pass an empty slice to satisfy the `RxToken` contract.
+            Ok(None) | Err(_) => {
+                self.state.drv_rx_dropped.fetch_add(1, Ordering::Relaxed);
+                f(&mut [])
+            }
+        }
     }
 }
 
-/// Transmit token for a single packet.
-///
-/// Created by [`EmacDriver::transmit`] or [`EmacDriver::receive`]
-/// and consumed by the embassy-net stack to send one frame.
-pub struct EmacTxToken<'d, const RX: usize, const TX: usize, const BUF: usize> {
+/// embassy-net TX token — submits one frame on `consume`.
+pub struct EmacTxToken<'a, const RX: usize, const TX: usize, const BUF: usize> {
     emac: *mut Emac<RX, TX, BUF>,
-    _marker: PhantomData<&'d mut Emac<RX, TX, BUF>>,
+    state: &'a EmacDriverState,
+    _marker: PhantomData<&'a mut Emac<RX, TX, BUF>>,
 }
 
 impl<const RX: usize, const TX: usize, const BUF: usize> TxToken for EmacTxToken<'_, RX, TX, BUF> {
@@ -308,18 +456,20 @@ impl<const RX: usize, const TX: usize, const BUF: usize> TxToken for EmacTxToken
         let len = len.min(MAX_FRAME_SIZE);
         let mut buffer = [0u8; MAX_FRAME_SIZE];
         let result = f(&mut buffer[..len]);
-
-        // SAFETY: The raw pointer is valid for the driver lifetime.
-        // Tokens are created and consumed within a single poll cycle.
+        // SAFETY: see `EmacRxToken::consume`.
         let emac = unsafe { &mut *self.emac };
-
-        let _ = emac.transmit(&buffer[..len]);
+        if emac.transmit(&buffer[..len]).is_err() {
+            // `embassy-net-driver`'s `TxToken::consume` has no fallible
+            // return, so a failed push silently drops the frame. Bump
+            // `tx_dropped` for diagnostics.
+            self.state.drv_tx_dropped.fetch_add(1, Ordering::Relaxed);
+        }
         result
     }
 }
 
 // =============================================================================
-// Driver Implementation
+// Driver trait
 // =============================================================================
 
 impl<const RX: usize, const TX: usize, const BUF: usize> Driver for EmacDriver<'_, RX, TX, BUF> {
@@ -333,44 +483,60 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Driver for EmacDriver<'
         Self: 'a;
 
     fn receive(&mut self, cx: &mut Context<'_>) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        // SAFETY: The raw pointer is valid for the driver lifetime.
+        self.state.drv_rx_calls.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: see `EmacDriver` doc.
         let emac = unsafe { &mut *self.emac };
 
         if !emac.rx_available() {
             self.state.rx_waker.register(cx.waker());
-            // Double-check after registering waker to avoid missed notifications.
             if !emac.rx_available() {
                 return None;
             }
         }
 
+        self.state.drv_rx_some.fetch_add(1, Ordering::Relaxed);
         Some((
             EmacRxToken {
                 emac: self.emac,
+                state: self.state,
                 _marker: PhantomData,
             },
             EmacTxToken {
                 emac: self.emac,
+                state: self.state,
                 _marker: PhantomData,
             },
         ))
     }
 
     fn transmit(&mut self, cx: &mut Context<'_>) -> Option<Self::TxToken<'_>> {
-        // SAFETY: The raw pointer is valid for the driver lifetime.
+        self.state.drv_tx_calls.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: see `EmacDriver` doc.
         let emac = unsafe { &mut *self.emac };
 
-        // Check if at least one single-buffer frame can be sent.
-        if !emac.can_transmit(1) {
+        // Gate on capacity for a worst-case MTU-sized frame, not just
+        // "≥ 1 free descriptor". A frame larger than `BUF` consumes
+        // `len.div_ceil(BUF)` descriptors, so on rings where `BUF < MTU`
+        // a single-descriptor readiness check would let the driver hand
+        // out a token that `EmacTxToken::consume` then can't actually
+        // push, silently dropping the frame.
+        //
+        // `effective_mtu()` is capped by `TX * BUF`, so on undersized
+        // rings we still gate on something the engine can transmit
+        // (smaller frames will fit) instead of permanently returning
+        // `None` for a 1514-byte target the ring can never hold.
+        let mtu = Self::effective_mtu();
+        if !emac.can_transmit(mtu) {
             self.state.tx_waker.register(cx.waker());
-            // Double-check after registering waker.
-            if !emac.can_transmit(1) {
+            if !emac.can_transmit(mtu) {
                 return None;
             }
         }
 
+        self.state.drv_tx_some.fetch_add(1, Ordering::Relaxed);
         Some(EmacTxToken {
             emac: self.emac,
+            state: self.state,
             _marker: PhantomData,
         })
     }
@@ -382,14 +548,16 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Driver for EmacDriver<'
 
     fn capabilities(&self) -> Capabilities {
         let mut caps = Capabilities::default();
-        caps.max_transmission_unit = ETHERNET_MTU;
+        // Advertise the value the driver can actually deliver (capped
+        // by ring capacity), not a fixed Ethernet MTU.
+        caps.max_transmission_unit = Self::effective_mtu();
         caps.max_burst_size = Some(1);
         caps.checksum = ChecksumCapabilities::default();
         caps
     }
 
     fn hardware_address(&self) -> HardwareAddress {
-        // SAFETY: The raw pointer is valid for the driver lifetime.
+        // SAFETY: see `EmacDriver` doc.
         let emac = unsafe { &*self.emac };
         HardwareAddress::Ethernet(emac.mac_address())
     }
@@ -401,251 +569,97 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Driver for EmacDriver<'
 
 #[cfg(test)]
 mod tests {
-    extern crate std;
-
     use super::*;
-    use crate::config::{ClkGpio, EmacConfig, RmiiClockConfig, RmiiPins};
-
-    /// Helper: create a test-friendly EmacConfig.
-    fn test_config() -> EmacConfig {
-        EmacConfig {
-            clock: RmiiClockConfig::InternalApll {
-                gpio: ClkGpio::Gpio17,
-            },
-            pins: RmiiPins::default(),
-        }
-    }
-
-    // ── EmacDriverState ────────────────────────────────────────────────
 
     #[test]
-    fn state_new_link_down() {
-        let state = EmacDriverState::new();
-        assert!(state.link_state() == LinkState::Down);
+    fn state_starts_link_down() {
+        let s = EmacDriverState::new();
+        assert!(matches!(s.link_state(), LinkState::Down));
     }
 
     #[test]
-    fn state_set_link_up() {
-        let state = EmacDriverState::new();
-        state.set_link_up();
-        assert!(state.link_state() == LinkState::Up);
-    }
-
-    #[test]
-    fn state_set_link_down() {
-        let state = EmacDriverState::new();
-        state.set_link_up();
-        assert!(state.link_state() == LinkState::Up);
-        state.set_link_down();
-        assert!(state.link_state() == LinkState::Down);
-    }
-
-    #[test]
-    fn state_link_toggle() {
-        let state = EmacDriverState::new();
-        for _ in 0..5 {
-            state.set_link_up();
-            assert!(state.link_state() == LinkState::Up);
-            state.set_link_down();
-            assert!(state.link_state() == LinkState::Down);
-        }
+    fn state_link_set_up_then_down() {
+        let s = EmacDriverState::new();
+        s.set_link_up();
+        assert!(matches!(s.link_state(), LinkState::Up));
+        s.set_link_down();
+        assert!(matches!(s.link_state(), LinkState::Down));
     }
 
     #[test]
     fn state_static_compatible() {
-        // Verify EmacDriverState can live in a static.
         static STATE: EmacDriverState = EmacDriverState::new();
-        assert!(STATE.link_state() == LinkState::Down);
+        assert!(matches!(STATE.link_state(), LinkState::Down));
     }
 
-    // ── AtomicWaker ────────────────────────────────────────────────────
+    // ── Driver wrapper (host-side static behaviour) ──────────────
 
-    #[test]
-    fn waker_initially_empty() {
-        let waker = AtomicWaker::new();
-        assert!(!waker.is_registered());
-    }
+    fn test_emac() -> Emac<10, 10, 1600> {
+        use crate::config::{ClkGpio, EmacConfig, RmiiClockConfig, RmiiPins, XtalFreq};
 
-    #[test]
-    fn waker_wake_without_register_is_noop() {
-        let waker = AtomicWaker::new();
-        waker.wake(); // should not panic
-        assert!(!waker.is_registered());
-    }
-
-    #[test]
-    fn waker_register_and_wake() {
-        use core::task::{RawWaker, RawWakerVTable, Waker};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-
-        struct Counter(AtomicUsize);
-
-        fn make_waker(counter: Arc<Counter>) -> Waker {
-            fn clone_fn(ptr: *const ()) -> RawWaker {
-                // SAFETY: ptr is from Arc::into_raw in this test.
-                let arc = unsafe { Arc::from_raw(ptr as *const Counter) };
-                let cloned = arc.clone();
-                core::mem::forget(arc);
-                RawWaker::new(Arc::into_raw(cloned) as *const (), &VTABLE)
-            }
-            fn wake_fn(ptr: *const ()) {
-                // SAFETY: ptr is from Arc::into_raw in this test.
-                let arc = unsafe { Arc::from_raw(ptr as *const Counter) };
-                arc.0.fetch_add(1, Ordering::SeqCst);
-            }
-            fn wake_by_ref_fn(ptr: *const ()) {
-                // SAFETY: ptr is from Arc::into_raw in this test.
-                let arc = unsafe { Arc::from_raw(ptr as *const Counter) };
-                arc.0.fetch_add(1, Ordering::SeqCst);
-                core::mem::forget(arc);
-            }
-            fn drop_fn(ptr: *const ()) {
-                // SAFETY: ptr is from Arc::into_raw in this test.
-                unsafe {
-                    Arc::from_raw(ptr as *const Counter);
-                }
-            }
-            static VTABLE: RawWakerVTable =
-                RawWakerVTable::new(clone_fn, wake_fn, wake_by_ref_fn, drop_fn);
-            let raw = RawWaker::new(Arc::into_raw(counter) as *const (), &VTABLE);
-            // SAFETY: raw is built from a valid vtable and pointer.
-            unsafe { Waker::from_raw(raw) }
-        }
-
-        let counter = Arc::new(Counter(AtomicUsize::new(0)));
-        let waker = make_waker(counter.clone());
-
-        let aw = AtomicWaker::new();
-        aw.register(&waker);
-        assert!(aw.is_registered());
-
-        aw.wake();
-        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
-        assert!(!aw.is_registered());
-
-        // Double wake is a no-op (waker already consumed).
-        aw.wake();
-        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+        Emac::new(EmacConfig {
+            clock: RmiiClockConfig::InternalApll {
+                gpio: ClkGpio::Gpio17,
+                xtal: XtalFreq::Mhz40,
+            },
+            pins: RmiiPins { mdc: 23, mdio: 18 },
+        })
     }
 
     #[test]
-    fn waker_register_overwrites_previous() {
-        use core::task::{RawWaker, RawWakerVTable, Waker};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-
-        struct Counter(AtomicUsize);
-
-        fn make_waker(counter: Arc<Counter>) -> Waker {
-            fn clone_fn(ptr: *const ()) -> RawWaker {
-                // SAFETY: ptr is from Arc::into_raw in this test.
-                let arc = unsafe { Arc::from_raw(ptr as *const Counter) };
-                let cloned = arc.clone();
-                core::mem::forget(arc);
-                RawWaker::new(Arc::into_raw(cloned) as *const (), &VTABLE)
-            }
-            fn wake_fn(ptr: *const ()) {
-                // SAFETY: ptr is from Arc::into_raw in this test.
-                let arc = unsafe { Arc::from_raw(ptr as *const Counter) };
-                arc.0.fetch_add(1, Ordering::SeqCst);
-            }
-            fn wake_by_ref_fn(ptr: *const ()) {
-                // SAFETY: ptr is from Arc::into_raw in this test.
-                let arc = unsafe { Arc::from_raw(ptr as *const Counter) };
-                arc.0.fetch_add(1, Ordering::SeqCst);
-                core::mem::forget(arc);
-            }
-            fn drop_fn(ptr: *const ()) {
-                // SAFETY: ptr is from Arc::into_raw in this test.
-                unsafe {
-                    Arc::from_raw(ptr as *const Counter);
-                }
-            }
-            static VTABLE: RawWakerVTable =
-                RawWakerVTable::new(clone_fn, wake_fn, wake_by_ref_fn, drop_fn);
-            let raw = RawWaker::new(Arc::into_raw(counter) as *const (), &VTABLE);
-            // SAFETY: raw is built from a valid vtable and pointer.
-            unsafe { Waker::from_raw(raw) }
-        }
-
-        let counter1 = Arc::new(Counter(AtomicUsize::new(0)));
-        let counter2 = Arc::new(Counter(AtomicUsize::new(0)));
-        let waker1 = make_waker(counter1.clone());
-        let waker2 = make_waker(counter2.clone());
-
-        let aw = AtomicWaker::new();
-        aw.register(&waker1);
-        aw.register(&waker2);
-        aw.wake();
-
-        // Only the second waker should have been woken.
-        assert_eq!(counter1.0.load(Ordering::SeqCst), 0);
-        assert_eq!(counter2.0.load(Ordering::SeqCst), 1);
-    }
-
-    // ── Capabilities ───────────────────────────────────────────────────
-
-    #[test]
-    fn capabilities_mtu() {
-        let mut emac: Emac<4, 4, 1600> = Emac::new(test_config());
+    fn driver_capabilities_advertise_mtu_and_burst() {
+        let mut emac = test_emac();
         let state = EmacDriverState::new();
         let driver = EmacDriver::new(&mut emac, &state);
 
         let caps = driver.capabilities();
-        assert_eq!(caps.max_transmission_unit, ETHERNET_MTU);
+        // 10 × 1600 ring fits a full Ethernet frame, so `effective_mtu`
+        // collapses to the standard ETH_MTU.
+        assert_eq!(caps.max_transmission_unit, ETH_MTU);
+        assert_eq!(caps.max_transmission_unit, 1514);
+        // Single-frame burst — the driver hands out one TX token at a
+        // time, so the stack should not pipeline more than one frame.
         assert_eq!(caps.max_burst_size, Some(1));
     }
 
     #[test]
-    fn hardware_address_returns_mac() {
-        let mut emac: Emac<4, 4, 1600> = Emac::new(test_config());
-        let mac = [0x02, 0x00, 0x00, 0x12, 0x34, 0x56];
-        emac.set_mac_address(mac);
+    fn effective_mtu_caps_to_ring_capacity() {
+        // Standard configuration: ring is plenty large, full ETH MTU.
+        assert_eq!(EmacDriver::<10, 10, 1600>::effective_mtu(), ETH_MTU);
+        assert_eq!(EmacDriver::<4, 4, 1600>::effective_mtu(), ETH_MTU);
+        // Undersized ring: `TX * BUF = 1024` < 1514. We must NOT advertise
+        // 1514 — the engine can't transmit that. Capped to ring capacity.
+        assert_eq!(EmacDriver::<2, 2, 512>::effective_mtu(), 1024);
+        // Edge: exactly equal to ETH_MTU.
+        assert_eq!(EmacDriver::<1, 1, 1514>::effective_mtu(), ETH_MTU);
+        // One byte short.
+        assert_eq!(EmacDriver::<1, 1, 1513>::effective_mtu(), 1513);
+    }
+
+    #[test]
+    fn driver_hardware_address_reflects_cached_mac() {
+        let mut emac = test_emac();
+        // Before any `set_mac_address`, the cached value is the zero
+        // address — the bring-up code is expected to programme one
+        // before `init` reaches the address-filter step.
+        {
+            let state = EmacDriverState::new();
+            let driver = EmacDriver::new(&mut emac, &state);
+            let HardwareAddress::Ethernet(mac) = driver.hardware_address() else {
+                panic!("expected Ethernet hardware address");
+            };
+            assert_eq!(mac, [0u8; 6]);
+        }
+
+        // Cache a MAC; the driver should reflect it on the next read.
+        let custom = [0xF0, 0x57, 0x8D, 0x01, 0x04, 0xE3];
+        emac.set_mac_address(custom);
 
         let state = EmacDriverState::new();
         let driver = EmacDriver::new(&mut emac, &state);
-
-        assert!(driver.hardware_address() == HardwareAddress::Ethernet(mac));
-    }
-
-    #[test]
-    fn hardware_address_zero_default() {
-        let mut emac: Emac<4, 4, 1600> = Emac::new(test_config());
-        let state = EmacDriverState::new();
-        let driver = EmacDriver::new(&mut emac, &state);
-
-        assert!(driver.hardware_address() == HardwareAddress::Ethernet([0; 6]));
-    }
-
-    #[test]
-    fn state_accessor() {
-        let mut emac: Emac<4, 4, 1600> = Emac::new(test_config());
-        let state = EmacDriverState::new();
-        let driver = EmacDriver::new(&mut emac, &state);
-
-        assert!(driver.state().link_state() == LinkState::Down);
-    }
-
-    // ── Constants ──────────────────────────────────────────────────────
-
-    #[test]
-    fn ethernet_mtu_is_standard() {
-        // Standard Ethernet: 1500 IP + 14 header = 1514.
-        assert_eq!(ETHERNET_MTU, 1514);
-    }
-
-    #[test]
-    fn max_frame_size_ge_mtu() {
-        assert!(MAX_FRAME_SIZE >= ETHERNET_MTU);
-    }
-
-    // ── LinkState ──────────────────────────────────────────────────────
-
-    #[test]
-    fn link_state_equality() {
-        assert!(LinkState::Up == LinkState::Up);
-        assert!(LinkState::Down == LinkState::Down);
-        assert!(LinkState::Up != LinkState::Down);
+        let HardwareAddress::Ethernet(mac) = driver.hardware_address() else {
+            panic!("expected Ethernet hardware address");
+        };
+        assert_eq!(mac, custom);
     }
 }

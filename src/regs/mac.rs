@@ -206,6 +206,90 @@ pub unsafe fn clear_bits(offset: usize, bits: u32) {
 }
 
 // =============================================================================
+// Composite operations (formerly ph_esp32_mac::unsafe_registers::MacRegs)
+// =============================================================================
+
+/// Read the GMAC Configuration register.
+#[inline(always)]
+pub fn config() -> u32 {
+    // SAFETY: GMACCONFIG is a known-valid 32-bit memory-mapped register.
+    unsafe { read(GMACCONFIG) }
+}
+
+/// Write the GMAC Configuration register.
+#[inline(always)]
+pub fn set_config(val: u32) {
+    // SAFETY: GMACCONFIG is a known-valid 32-bit memory-mapped register.
+    unsafe { write(GMACCONFIG, val) }
+}
+
+/// Write the GMAC Frame Filter register.
+#[inline(always)]
+pub fn set_frame_filter(val: u32) {
+    // SAFETY: GMACFF is a known-valid 32-bit memory-mapped register.
+    unsafe { write(GMACFF, val) }
+}
+
+/// Write the 64-bit hash filter table (low → `GMACHASTL`, high → `GMACHASTH`).
+#[inline(always)]
+pub fn set_hash_table(value: u64) {
+    // SAFETY: both registers are known-valid 32-bit memory-mapped registers.
+    unsafe {
+        write(GMACHASTL, value as u32);
+        write(GMACHASTH, (value >> 32) as u32);
+    }
+}
+
+/// Apply the 100 Mbps / 10 Mbps speed setting (RMW on `GMACCONFIG.FES`).
+#[inline(always)]
+pub fn set_speed_100mbps(is_100: bool) {
+    // SAFETY: GMACCONFIG is a known-valid 32-bit memory-mapped register.
+    unsafe {
+        if is_100 {
+            set_bits(GMACCONFIG, config::SPEED_100);
+        } else {
+            clear_bits(GMACCONFIG, config::SPEED_100);
+        }
+    }
+}
+
+/// Apply the full / half duplex setting (RMW on `GMACCONFIG.DM`).
+#[inline(always)]
+pub fn set_duplex_full(full: bool) {
+    // SAFETY: GMACCONFIG is a known-valid 32-bit memory-mapped register.
+    unsafe {
+        if full {
+            set_bits(GMACCONFIG, config::DUPLEX_FULL);
+        } else {
+            clear_bits(GMACCONFIG, config::DUPLEX_FULL);
+        }
+    }
+}
+
+/// Programme the primary MAC address into ADDR0H / ADDR0L (with AE bit).
+///
+/// The Synopsys DesignWare GMAC core latches the filter address on the
+/// write to **ADDR0L** (the low half). Therefore the high half (with the
+/// `AE` bit) MUST be written first, then the low half. Writing in the
+/// opposite order leaves the internal filter latched with the stale
+/// reset/efuse value while register read-back happily shows the new
+/// address — and unicast RX dies silently.
+pub fn set_mac_address(addr: &[u8; 6]) {
+    let high = (addr[4] as u32) | ((addr[5] as u32) << 8) | (1u32 << 31);
+    let low = (addr[0] as u32)
+        | ((addr[1] as u32) << 8)
+        | ((addr[2] as u32) << 16)
+        | ((addr[3] as u32) << 24);
+    // SAFETY: ADDR0H/ADDR0L are valid 32-bit MAC registers; caller has
+    // already enabled the EMAC peripheral clock by the time `init()`
+    // reaches this step.
+    unsafe {
+        write(GMACADDR0H, high);
+        write(GMACADDR0L, low);
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 

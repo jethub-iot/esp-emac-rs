@@ -14,41 +14,102 @@ pub struct EmacConfig {
 
 /// RMII reference clock configuration.
 ///
-/// The 50 MHz RMII clock can be generated internally (APLL) or supplied
-/// externally from the PHY's crystal oscillator.
+/// The 50 MHz RMII clock can be generated internally (ESP32 APLL) or
+/// supplied externally from a PHY-driven oscillator. Mode selection is
+/// hardware-specific and `Emac::init` rejects mismatched GPIO choices
+/// with [`crate::EmacError::InvalidConfig`] — see each variant's docs
+/// for which pads are valid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum RmiiClockConfig {
-    /// ESP32 APLL generates 50 MHz, output on GPIO.
+    /// ESP32 APLL generates 50 MHz and drives it out of the chip.
     ///
-    /// Cannot coexist with WiFi/BT: ESP32 errata CLK-3.22 causes
-    /// REF_CLK instability on the GPIO pin during RF transmission.
-    /// APLL itself is a separate PLL from BBPLL (used by WiFi),
-    /// but the clock OUTPUT signal is corrupted by on-chip RF noise.
+    /// Valid GPIO choices: [`ClkGpio::Gpio16`] (`EMAC_CLK_OUT`, 0°) or
+    /// [`ClkGpio::Gpio17`] (`EMAC_CLK_OUT_180`, 180° — the LAN8720A
+    /// reference design preference). [`ClkGpio::Gpio0`] is **invalid**
+    /// for this mode: GPIO0 function 5 is `EMAC_TX_CLK`, an input pad.
+    ///
+    /// `xtal` selects the SDM coefficients for APLL programming and
+    /// MUST match the actual on-board crystal — there is no detection
+    /// at runtime, getting it wrong silently produces a wrong-frequency
+    /// REF_CLK and the link will not come up.
+    ///
+    /// Coexistence note: ESP32 errata CLK-3.22 — the APLL clock signal
+    /// emitted on the GPIO pad is corrupted by on-chip RF noise during
+    /// WiFi/BT transmission. This mode is unsafe with active radio;
+    /// boards needing Ethernet + WiFi should use [`Self::External`].
     InternalApll {
-        /// GPIO for clock output (only 0, 16, or 17).
+        /// GPIO for clock output. Must be `Gpio16` or `Gpio17`.
         gpio: ClkGpio,
+        /// On-board crystal frequency. APLL SDM coefficients are
+        /// chosen accordingly to land on a 50 MHz RMII reference clock.
+        xtal: XtalFreq,
     },
-    /// External 50 MHz clock from PHY crystal.
+    /// External 50 MHz clock fed in from a PHY crystal or oscillator.
     ///
-    /// Required for Ethernet + WiFi coexistence (immune to on-chip noise).
+    /// Valid GPIO choice: [`ClkGpio::Gpio0`] only — that is the only
+    /// pad whose function 5 (`EMAC_TX_CLK`) is an input. `Gpio16` /
+    /// `Gpio17` are **invalid** here.
+    ///
+    /// Required for Ethernet + WiFi coexistence (immune to the
+    /// CLK-3.22 errata since the clock never leaves the PHY domain).
     External {
-        /// GPIO for clock input (only 0, 16, or 17).
+        /// GPIO for clock input. Must be `Gpio0`.
         gpio: ClkGpio,
     },
 }
 
-/// GPIO pins that can carry the EMAC RMII reference clock.
+/// On-board crystal frequency in MHz, used to pick APLL SDM coefficients
+/// for a 50 MHz RMII reference-clock output.
 ///
-/// Only GPIO0, GPIO16, and GPIO17 support EMAC clock I/O on ESP32.
+/// ESP32 SoC accepts crystals at 26, 32, or 40 MHz. The vast majority
+/// of modules ship with 40 MHz (`ESP32-WROOM-32`, `ESP32-WROVER`,
+/// `ESP32-MINI-1` and most reference designs). 26 MHz appears in older
+/// QFN-only designs; 32 MHz is rare custom-design territory. The crate
+/// only provides coefficients for these three values — for any other
+/// crystal you will need to extend [`crate::clock::ApllCoefficients`]
+/// and submit a patch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum XtalFreq {
+    /// 26 MHz — legacy ESP32 modules, certain QFN bare-chip designs.
+    Mhz26,
+    /// 32 MHz — rare custom designs.
+    Mhz32,
+    /// 40 MHz — ESP32-WROOM, ESP32-WROVER, ESP32-MINI, most modern boards.
+    Mhz40,
+}
+
+impl XtalFreq {
+    /// Frequency in MHz as a `u32`. Useful for logging / diagnostics.
+    pub const fn mhz(self) -> u32 {
+        match self {
+            Self::Mhz26 => 26,
+            Self::Mhz32 => 32,
+            Self::Mhz40 => 40,
+        }
+    }
+}
+
+/// GPIO pins that can carry the EMAC RMII reference clock on ESP32.
+///
+/// Direction is fixed by the IO_MUX function 5 wiring:
+///
+/// - [`Self::Gpio0`] — `EMAC_TX_CLK`, input only — pair with
+///   [`RmiiClockConfig::External`].
+/// - [`Self::Gpio16`] — `EMAC_CLK_OUT` (0°), output only — pair with
+///   [`RmiiClockConfig::InternalApll`].
+/// - [`Self::Gpio17`] — `EMAC_CLK_OUT_180` (180°), output only — pair
+///   with [`RmiiClockConfig::InternalApll`]. Most common on LAN8720A.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ClkGpio {
-    /// GPIO0 — also used for boot strapping, use with caution.
+    /// GPIO0 — `EMAC_TX_CLK` input. Also a boot-strapping pin, take
+    /// care that the external oscillator does not violate boot timing.
     Gpio0,
-    /// GPIO16 — EMAC_CLK_OUT (0° phase).
+    /// GPIO16 — `EMAC_CLK_OUT` (0° phase).
     Gpio16,
-    /// GPIO17 — EMAC_CLK_OUT_180 (180° phase, most common for LAN8720A).
+    /// GPIO17 — `EMAC_CLK_OUT_180` (180° phase, most common for LAN8720A).
     Gpio17,
 }
 
@@ -105,15 +166,30 @@ mod tests {
     fn rmii_clock_config_equality() {
         let a = RmiiClockConfig::InternalApll {
             gpio: ClkGpio::Gpio17,
+            xtal: XtalFreq::Mhz40,
         };
         let b = RmiiClockConfig::InternalApll {
             gpio: ClkGpio::Gpio17,
+            xtal: XtalFreq::Mhz40,
         };
         let c = RmiiClockConfig::External {
             gpio: ClkGpio::Gpio0,
         };
+        let d = RmiiClockConfig::InternalApll {
+            gpio: ClkGpio::Gpio17,
+            xtal: XtalFreq::Mhz26,
+        };
         assert_eq!(a, b);
         assert_ne!(a, c);
+        // Different XTAL — different config.
+        assert_ne!(a, d);
+    }
+
+    #[test]
+    fn xtal_freq_mhz_values() {
+        assert_eq!(XtalFreq::Mhz26.mhz(), 26);
+        assert_eq!(XtalFreq::Mhz32.mhz(), 32);
+        assert_eq!(XtalFreq::Mhz40.mhz(), 40);
     }
 
     #[test]
@@ -121,6 +197,7 @@ mod tests {
         let config = EmacConfig {
             clock: RmiiClockConfig::InternalApll {
                 gpio: ClkGpio::Gpio17,
+                xtal: XtalFreq::Mhz40,
             },
             pins: RmiiPins::default(),
         };

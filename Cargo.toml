@@ -6,14 +6,17 @@ rust-version  = "1.75"
 authors       = ["Viacheslav Bocharov <v@baodeep.com>", "JetHome (r)"]
 license       = "GPL-2.0-or-later OR Apache-2.0"
 description   = "ESP32 EMAC bare-metal Ethernet MAC driver with DMA, RMII, and MDIO"
-repository    = "https://github.com/jethub-iot/esp-emac"
+repository    = "https://github.com/jethub-iot/esp-emac-rs"
 keywords      = ["embedded", "no-std", "esp32", "ethernet", "emac"]
 categories    = ["embedded", "no-std", "hardware-support"]
 
 [dependencies]
 embedded-hal       = "1.0"
+embedded-hal-async = { version = "1.0", optional = true }
+esp-hal            = { version = "1.0.0", features = ["esp32", "unstable"], optional = true }
 eth-mdio-phy       = { version = "0.1.0", path = "../eth-phy/crates/eth-mdio-phy", optional = true }
 embassy-net-driver = { version = "0.2", optional = true }
+embassy-sync       = { version = "0.7", optional = true }
 critical-section   = { version = "1.2", optional = true }
 defmt              = { version = "0.3", optional = true }
 
@@ -23,5 +26,12 @@ critical-section = { version = "1.2", features = ["std"] }
 [features]
 default     = []
 mdio-phy    = ["dep:eth-mdio-phy"]
-embassy-net = ["dep:embassy-net-driver", "dep:critical-section"]
+# Activate hardware integrations (esp-hal interrupt binding etc.)
+# Required for the firmware build; tests run without it.
+esp-hal     = ["dep:esp-hal"]
+embassy-net = ["dep:embassy-net-driver", "dep:embassy-sync", "dep:critical-section"]
+# Expose async-flavoured helpers (currently `reset::async_impl::AsyncResetController`)
+# that take an `embedded_hal_async::delay::DelayNs` instead of the
+# blocking `embedded_hal::delay::DelayNs`. Independent of `embassy-net`.
+async       = ["dep:embedded-hal-async"]
 defmt       = ["dep:defmt"]

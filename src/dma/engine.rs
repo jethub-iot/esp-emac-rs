@@ -188,11 +188,35 @@ impl<const RX: usize, const TX: usize, const BUF: usize> DmaEngine<RX, TX, BUF> 
 
     // ── Reception ─────────────────────────────────────────
 
-    /// Check if a received frame is available.
+    /// Check if there is something for `receive` to do on the current
+    /// descriptor. Returns `true` when:
+    ///
+    /// - the current descriptor is CPU-owned and carries an error flag
+    ///   (CRC, overflow, etc.) — `receive` will recycle it as part of
+    ///   its error path, so the driver still needs to be woken; or
+    /// - a complete (possibly multi-descriptor) frame is available, as
+    ///   determined by `peek_frame_length`.
+    ///
+    /// Two earlier implementations both had bugs:
+    /// 1. `!current.is_owned() && current.is_last()` missed multi-
+    ///    descriptor frames whose head wasn't itself `LAST`.
+    /// 2. `peek_frame_length().is_some()` fixed (1) but missed error
+    ///    frames (peek declines to report a length for them), so the
+    ///    embassy-net driver never called `receive` to flush a
+    ///    CRC-failed frame — RX would wedge as the ring filled with
+    ///    untouched error descriptors.
     #[must_use]
     pub fn rx_available(&self) -> bool {
         let desc = self.rx_ring.current();
-        !desc.is_owned() && desc.is_last()
+        if desc.is_owned() {
+            return false;
+        }
+        // Errored descriptor still needs draining via `receive` so the
+        // chain doesn't fill up with bad frames; peek would say None.
+        if desc.has_error() {
+            return true;
+        }
+        self.peek_frame_length().is_some()
     }
 
     /// Receive a frame into the provided buffer.
@@ -484,10 +508,10 @@ mod tests {
 
     #[test]
     fn memory_usage_calculation() {
-        // 4 * 16 (rx desc) + 4 * 16 (tx desc) + 4 * 256 (rx buf) + 4 * 256 (tx buf)
-        // = 64 + 64 + 1024 + 1024 = 2176
+        // 4 * 32 (rx desc) + 4 * 32 (tx desc) + 4 * 256 (rx buf) + 4 * 256 (tx buf)
+        // = 128 + 128 + 1024 + 1024 = 2304
         let usage = DmaEngine::<4, 4, 256>::memory_usage();
-        assert_eq!(usage, 2176);
+        assert_eq!(usage, 2304);
     }
 
     #[test]
@@ -749,6 +773,76 @@ mod tests {
         let _ = engine.init();
 
         assert_eq!(engine.peek_frame_length(), None);
+    }
+
+    /// Simulate a two-descriptor RX frame: `desc[start]` carries
+    /// `FIRST` + payload[..mid], `desc[start+1]` carries `LAST` +
+    /// payload[mid..] with the total frame length in its RDES0.
+    fn simulate_rx_frame_two_descriptors(
+        engine: &mut DmaEngine<4, 4, 256>,
+        start: usize,
+        chunks: (&[u8], &[u8]),
+    ) {
+        let (a, b) = chunks;
+        engine.rx_buffers[start][..a.len()].copy_from_slice(a);
+        engine.rx_buffers[start + 1][..b.len()].copy_from_slice(b);
+
+        // First descriptor: FIRST, no LAST, no length encoded
+        // (length lives in the LAST descriptor on this Synopsys core).
+        engine.rx_ring.get(start).set_raw_rdes0(rdes0::FIRST_DESC);
+
+        // Last descriptor: LAST, no FIRST, total frame length (incl. CRC).
+        let frame_len_with_crc = (a.len() + b.len() + 4) as u32;
+        let rdes0_val = rdes0::LAST_DESC | (frame_len_with_crc << rdes0::FRAME_LEN_SHIFT);
+        engine.rx_ring.get(start + 1).set_raw_rdes0(rdes0_val);
+    }
+
+    #[test]
+    fn rx_available_true_for_errored_frame() {
+        // Regression: switching `rx_available` to `peek_frame_length`
+        // accidentally hid CPU-owned-but-errored descriptors. The
+        // embassy driver gates on `rx_available`, so an errored frame
+        // would never make it to `receive` and the descriptor would
+        // sit unrecycled until something else drained the chain.
+        let mut engine: DmaEngine<4, 4, 256> = DmaEngine::new();
+        let _ = engine.init();
+
+        // Mark desc[0] as CPU-owned with the ERR_SUMMARY bit set,
+        // FIRST + LAST so it could be a complete (but broken) frame.
+        let rdes0_val = rdes0::FIRST_DESC | rdes0::LAST_DESC | rdes0::ERR_SUMMARY | rdes0::CRC_ERR;
+        engine.rx_ring.get(0).set_raw_rdes0(rdes0_val);
+
+        // peek_frame_length still returns None for errored descriptors
+        // — that's intentional, callers shouldn't get a length back.
+        assert_eq!(engine.peek_frame_length(), None);
+        // …but rx_available must say "yes, drain me" so the driver
+        // wakes up and lets `receive` recycle the descriptor.
+        assert!(
+            engine.rx_available(),
+            "rx_available must signal errored frames so receive can flush them"
+        );
+    }
+
+    #[test]
+    fn rx_available_true_for_multi_descriptor_frame() {
+        // Regression: previous `rx_available` returned `!current.is_owned() &&
+        // current.is_last()`, which silently said "no frame" for any RX
+        // chain where the current descriptor was the FIRST (not LAST)
+        // chunk. Now it must agree with `peek_frame_length`.
+        let mut engine: DmaEngine<4, 4, 256> = DmaEngine::new();
+        let _ = engine.init();
+
+        let chunk_a = [0xAA; 200];
+        let chunk_b = [0xBB; 100];
+        simulate_rx_frame_two_descriptors(&mut engine, 0, (&chunk_a, &chunk_b));
+
+        // `current` points at desc[0] which is FIRST but NOT LAST. The
+        // pre-fix implementation returned `false` here.
+        assert!(
+            engine.rx_available(),
+            "rx_available must report a multi-descriptor frame as ready"
+        );
+        assert_eq!(engine.peek_frame_length(), Some(300));
     }
 
     #[test]
