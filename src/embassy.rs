@@ -119,8 +119,11 @@ pub struct IrqCounters {
 /// Maximum frame size for stack-allocated copy buffers (Ethernet MTU + headers).
 const MAX_FRAME_SIZE: usize = 1600;
 
-/// Maximum transmission unit reported to embassy-net (IP MTU + Ethernet header).
-const MTU: usize = 1514;
+/// Standard Ethernet MTU (IP MTU + L2 header). Upper bound on the value
+/// the driver advertises to embassy-net — see
+/// `EmacDriver::effective_mtu` for the per-instance value, which caps
+/// this against the physical TX ring capacity.
+const ETH_MTU: usize = 1514;
 
 // =============================================================================
 // Driver state
@@ -366,6 +369,25 @@ impl<'d, const RX: usize, const TX: usize, const BUF: usize> EmacDriver<'d, RX, 
     pub fn state(&self) -> &EmacDriverState {
         self.state
     }
+
+    /// Effective MTU advertised to embassy-net and used as the
+    /// readiness threshold in `Driver::transmit`.
+    ///
+    /// Capped by the physical TX ring capacity (`TX * BUF`) so the
+    /// driver never advertises — and never gates on — a frame size
+    /// the engine couldn't actually push. On normal rings (e.g.
+    /// `TX=10, BUF=1600`) this returns the standard Ethernet MTU
+    /// of `1514`. On undersized rings (`TX * BUF < 1514`) it shrinks
+    /// to `TX * BUF`, so small frames still flow even though full-MTU
+    /// frames are physically impossible.
+    pub const fn effective_mtu() -> usize {
+        let ring_capacity = TX * BUF;
+        if ring_capacity < ETH_MTU {
+            ring_capacity
+        } else {
+            ETH_MTU
+        }
+    }
 }
 
 // =============================================================================
@@ -483,9 +505,15 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Driver for EmacDriver<'
         // a single-descriptor readiness check would let the driver hand
         // out a token that `EmacTxToken::consume` then can't actually
         // push, silently dropping the frame.
-        if !emac.can_transmit(MTU) {
+        //
+        // `effective_mtu()` is capped by `TX * BUF`, so on undersized
+        // rings we still gate on something the engine can transmit
+        // (smaller frames will fit) instead of permanently returning
+        // `None` for a 1514-byte target the ring can never hold.
+        let mtu = Self::effective_mtu();
+        if !emac.can_transmit(mtu) {
             self.state.tx_waker.register(cx.waker());
-            if !emac.can_transmit(MTU) {
+            if !emac.can_transmit(mtu) {
                 return None;
             }
         }
@@ -505,7 +533,9 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Driver for EmacDriver<'
 
     fn capabilities(&self) -> Capabilities {
         let mut caps = Capabilities::default();
-        caps.max_transmission_unit = MTU;
+        // Advertise the value the driver can actually deliver (capped
+        // by ring capacity), not a fixed Ethernet MTU.
+        caps.max_transmission_unit = Self::effective_mtu();
         caps.max_burst_size = Some(1);
         caps.checksum = ChecksumCapabilities::default();
         caps
@@ -568,14 +598,27 @@ mod tests {
         let driver = EmacDriver::new(&mut emac, &state);
 
         let caps = driver.capabilities();
-        // `max_transmission_unit` is advertised to embassy-net so the
-        // stack can size its packet pool appropriately. Pinning the
-        // exact value here is intentional — bumping MTU should be a
-        // deliberate, reviewable change.
-        assert_eq!(caps.max_transmission_unit, MTU);
+        // 10 × 1600 ring fits a full Ethernet frame, so `effective_mtu`
+        // collapses to the standard ETH_MTU.
+        assert_eq!(caps.max_transmission_unit, ETH_MTU);
+        assert_eq!(caps.max_transmission_unit, 1514);
         // Single-frame burst — the driver hands out one TX token at a
         // time, so the stack should not pipeline more than one frame.
         assert_eq!(caps.max_burst_size, Some(1));
+    }
+
+    #[test]
+    fn effective_mtu_caps_to_ring_capacity() {
+        // Standard configuration: ring is plenty large, full ETH MTU.
+        assert_eq!(EmacDriver::<10, 10, 1600>::effective_mtu(), ETH_MTU);
+        assert_eq!(EmacDriver::<4, 4, 1600>::effective_mtu(), ETH_MTU);
+        // Undersized ring: `TX * BUF = 1024` < 1514. We must NOT advertise
+        // 1514 — the engine can't transmit that. Capped to ring capacity.
+        assert_eq!(EmacDriver::<2, 2, 512>::effective_mtu(), 1024);
+        // Edge: exactly equal to ETH_MTU.
+        assert_eq!(EmacDriver::<1, 1, 1514>::effective_mtu(), ETH_MTU);
+        // One byte short.
+        assert_eq!(EmacDriver::<1, 1, 1513>::effective_mtu(), 1513);
     }
 
     #[test]
