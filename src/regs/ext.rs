@@ -29,21 +29,13 @@ pub const DPORT_WIFI_CLK_EN_REG: usize = 0x3FF0_00CC;
 pub const DPORT_WIFI_CLK_EMAC_EN: u32 = 1 << 14;
 
 // =============================================================================
-// IO_MUX constants (for GPIO0 RMII clock input)
+// IO_MUX
 // =============================================================================
 
-/// IO_MUX base address (ESP32).
+/// IO_MUX base address (ESP32). Re-exported here for the cross-module
+/// consistency test in `crate::clock`; the bit-field constants live in
+/// `crate::regs::gpio` where the GPIO Matrix routing actually uses them.
 pub const IO_MUX_BASE: usize = 0x3FF4_9000;
-/// IO_MUX GPIO0 register offset.
-pub const IO_MUX_GPIO0_OFFSET: usize = 0x44;
-/// IO_MUX FUN_IE bit (input enable) — bit 9.
-pub const IO_MUX_FUN_IE: u32 = 1 << 9;
-/// IO_MUX MCU_SEL field shift — bits 14:12.
-pub const IO_MUX_MCU_SEL_SHIFT: u32 = 12;
-/// IO_MUX MCU_SEL field mask (3 bits).
-pub const IO_MUX_MCU_SEL_MASK: u32 = 0x07 << 12;
-/// EMAC_TX_CLK function for GPIO0 (function 5, used as RMII ref clock input).
-pub const IO_MUX_GPIO0_FUNC_EMAC_TX_CLK: u32 = 5;
 
 // =============================================================================
 // Register Offsets
@@ -270,23 +262,6 @@ pub fn set_rmii_clock_internal() {
     }
 }
 
-/// Route GPIO0 IO_MUX function 5 (`EMAC_TX_CLK`) and enable the input
-/// buffer, so an external 50 MHz oscillator on GPIO0 reaches the EMAC.
-/// MUST be called before [`enable_clocks`] when the board uses an
-/// external clock — without it the DMA software reset never completes.
-#[inline(always)]
-pub fn configure_gpio0_rmii_clock_input() {
-    let addr = IO_MUX_BASE + IO_MUX_GPIO0_OFFSET;
-    // SAFETY: IO_MUX[GPIO0] is a known-valid 32-bit register.
-    unsafe {
-        let cur = core::ptr::read_volatile(addr as *const u32);
-        let new_val = (cur & !IO_MUX_MCU_SEL_MASK)
-            | (IO_MUX_GPIO0_FUNC_EMAC_TX_CLK << IO_MUX_MCU_SEL_SHIFT)
-            | IO_MUX_FUN_IE;
-        core::ptr::write_volatile(addr as *mut u32, new_val);
-    }
-}
-
 /// Power up the EMAC's internal RAM (`EX_PD_SEL.ram_pd = 0`).
 #[inline(always)]
 pub fn power_up_ram() {
@@ -364,12 +339,6 @@ mod tests {
         // Bit 14 in the DPORT WIFI_CLK_EN register
         assert_eq!(DPORT_WIFI_CLK_EMAC_EN, 1 << 14);
         assert_eq!(DPORT_WIFI_CLK_EMAC_EN, 0x4000);
-    }
-
-    #[test]
-    fn io_mux_gpio0_func_emac_tx_clk_fits_mcu_sel() {
-        // Function 5 must fit in the 3-bit MCU_SEL field
-        assert!(IO_MUX_GPIO0_FUNC_EMAC_TX_CLK < 8);
     }
 
     #[test]
