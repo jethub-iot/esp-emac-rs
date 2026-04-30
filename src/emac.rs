@@ -310,8 +310,17 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             EmacState::Uninitialized => return Err(EmacError::NotInitialized),
         }
 
-        // Reset descriptor ownership in case of a previous run.
-        let (_rx_base, _tx_base) = self.dma.reset();
+        // Reset descriptor ownership in case of a previous run, then
+        // re-program `DMARXBASEADDR` / `DMATXBASEADDR` from the base
+        // addresses the engine returns. `dma.reset()` rebuilds chains
+        // and zeroes the software `current_index`; the hardware DMA
+        // pointer wherever it last was (middle of the ring after a
+        // `stop()`/`start()` cycle, or unset on the very first start)
+        // must be put back on the chain head, otherwise software and
+        // hardware will walk different descriptors and RX wedges.
+        let (rx_base, tx_base) = self.dma.reset();
+        dma_regs::set_rx_desc_list_addr(rx_base);
+        dma_regs::set_tx_desc_list_addr(tx_base);
 
         dma_regs::clear_all_interrupts();
         dma_regs::enable_default_interrupts();
