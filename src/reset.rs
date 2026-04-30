@@ -14,8 +14,9 @@
 //!
 //! For a true async variant — using `embedded_hal_async::delay::DelayNs`
 //! so each poll-step `.await`s and yields control back to the executor —
-//! enable the `async` cargo feature and use the `AsyncResetController`
-//! re-exported from the `async_impl` module.
+//! enable the `async` cargo feature and use
+//! `crate::reset::async_impl::AsyncResetController`, defined in the
+//! cfg-gated `async_impl` submodule.
 
 use embedded_hal::delay::DelayNs;
 
@@ -66,9 +67,12 @@ impl<D: DelayNs> ResetController<D> {
 
         // Compute in u64 then clamp to u32 so `timeout_ms` values past
         // ~4.3 s (where `timeout_ms * 1000` would wrap a u32) still
-        // produce a sane upper bound on the polling loop.
+        // produce a sane upper bound on the polling loop. Force at
+        // least one iteration so a `timeout_ms = 0` caller still gets
+        // a single read (the soft-reset bit usually clears within a
+        // few microseconds — much faster than any meaningful timeout).
         let max_iters = (u64::from(self.timeout_ms) * 1000 / u64::from(RESET_POLL_INTERVAL_US))
-            .min(u64::from(u32::MAX)) as u32;
+            .clamp(1, u64::from(u32::MAX)) as u32;
         for _ in 0..max_iters {
             // SAFETY: same address, read-only volatile.
             let still_in_progress = unsafe { dma::read(DMABUSMODE) } & bus_mode::SW_RESET != 0;
@@ -129,8 +133,11 @@ pub mod async_impl {
             // SAFETY: DMABUSMODE is a known-valid 32-bit register.
             unsafe { dma::set_bits(DMABUSMODE, bus_mode::SW_RESET) };
 
+            // Floor `max_iters` to 1 so a `timeout_ms = 0` caller
+            // still gets a single check — the soft-reset bit usually
+            // clears within microseconds.
             let max_iters = (u64::from(self.timeout_ms) * 1000 / u64::from(RESET_POLL_INTERVAL_US))
-                .min(u64::from(u32::MAX)) as u32;
+                .clamp(1, u64::from(u32::MAX)) as u32;
             for _ in 0..max_iters {
                 // SAFETY: same address, read-only volatile.
                 let still_in_progress = unsafe { dma::read(DMABUSMODE) } & bus_mode::SW_RESET != 0;
