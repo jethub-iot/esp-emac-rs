@@ -188,15 +188,26 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             return Err(EmacError::InvalidConfig);
         }
 
-        // External REF_CLK input on ESP32 only works on GPIO0 — that's
-        // the only pad whose IO_MUX function 5 is `EMAC_TX_CLK` (an
-        // input). On GPIO16/GPIO17, function 5 is `EMAC_CLK_OUT` /
-        // `EMAC_CLK_OUT_180` (outputs), so picking them for external
-        // input is a misconfiguration the hardware can't honour.
-        if let RmiiClockConfig::External { gpio } = self.config.clock {
-            if !matches!(gpio, ClkGpio::Gpio0) {
+        // RMII reference-clock pad direction on ESP32 is fixed by the
+        // IO_MUX function:
+        //
+        // - GPIO0  function 5 = `EMAC_TX_CLK`         — INPUT only
+        // - GPIO16 function 5 = `EMAC_CLK_OUT`        — OUTPUT only
+        // - GPIO17 function 5 = `EMAC_CLK_OUT_180`    — OUTPUT only
+        //
+        // External clock therefore requires GPIO0 (the only input pad);
+        // internal APLL output requires GPIO16 or GPIO17. Any other
+        // combination is hardware-impossible — reject it before we
+        // start writing IO_MUX bits, since `configure_clock` would
+        // happily program an output pad as input or vice versa.
+        match self.config.clock {
+            RmiiClockConfig::External { gpio } if !matches!(gpio, ClkGpio::Gpio0) => {
                 return Err(EmacError::InvalidConfig);
             }
+            RmiiClockConfig::InternalApll { gpio } if matches!(gpio, ClkGpio::Gpio0) => {
+                return Err(EmacError::InvalidConfig);
+            }
+            _ => {}
         }
 
         // 1. Clock GPIO + APLL (or input pad for external clock).
@@ -490,16 +501,12 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
     }
 }
 
-impl<const RX: usize, const TX: usize, const BUF: usize> Default for Emac<RX, TX, BUF> {
-    fn default() -> Self {
-        Self::new(EmacConfig {
-            clock: RmiiClockConfig::InternalApll {
-                gpio: ClkGpio::Gpio17,
-            },
-            pins: crate::config::RmiiPins::default(),
-        })
-    }
-}
+// `Default for Emac` is intentionally not implemented. The clock and pin
+// configuration is hardware-specific and silently picking one (e.g.
+// internal APLL on GPIO17) would mis-drive any board that expects an
+// external PHY-driven clock or that routes MDC/MDIO to non-default
+// GPIOs. Callers must construct an explicit `EmacConfig` — see the
+// crate-level docs and `RmiiClockConfig` for the available modes.
 
 /// Convenience alias: 10 RX / 10 TX / 1600-byte buffers.
 pub type EmacDefault = Emac<10, 10, 1600>;
@@ -530,16 +537,25 @@ impl<D: DelayNs + ?Sized> DelayNs for BorrowedDelay<'_, D> {
 mod tests {
     use super::*;
 
+    fn test_config() -> EmacConfig {
+        EmacConfig {
+            clock: RmiiClockConfig::InternalApll {
+                gpio: ClkGpio::Gpio17,
+            },
+            pins: crate::config::RmiiPins::default(),
+        }
+    }
+
     #[test]
     fn new_is_uninitialized() {
-        let emac = EmacDefault::default();
+        let emac: EmacDefault = Emac::new(test_config());
         assert_eq!(emac.state(), EmacState::Uninitialized);
         assert_eq!(emac.mac_address(), [0u8; 6]);
     }
 
     #[test]
     fn set_mac_before_init_only_caches() {
-        let mut emac = EmacDefault::default();
+        let mut emac: EmacDefault = Emac::new(test_config());
         let mac = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
         emac.set_mac_address(mac);
         assert_eq!(emac.mac_address(), mac);

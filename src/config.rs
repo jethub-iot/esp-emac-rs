@@ -14,41 +14,62 @@ pub struct EmacConfig {
 
 /// RMII reference clock configuration.
 ///
-/// The 50 MHz RMII clock can be generated internally (APLL) or supplied
-/// externally from the PHY's crystal oscillator.
+/// The 50 MHz RMII clock can be generated internally (ESP32 APLL) or
+/// supplied externally from a PHY-driven oscillator. Mode selection is
+/// hardware-specific and `Emac::init` rejects mismatched GPIO choices
+/// with [`crate::EmacError::InvalidConfig`] — see each variant's docs
+/// for which pads are valid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum RmiiClockConfig {
-    /// ESP32 APLL generates 50 MHz, output on GPIO.
+    /// ESP32 APLL generates 50 MHz and drives it out of the chip.
     ///
-    /// Cannot coexist with WiFi/BT: ESP32 errata CLK-3.22 causes
-    /// REF_CLK instability on the GPIO pin during RF transmission.
-    /// APLL itself is a separate PLL from BBPLL (used by WiFi),
-    /// but the clock OUTPUT signal is corrupted by on-chip RF noise.
+    /// Valid GPIO choices: [`ClkGpio::Gpio16`] (`EMAC_CLK_OUT`, 0°) or
+    /// [`ClkGpio::Gpio17`] (`EMAC_CLK_OUT_180`, 180° — the LAN8720A
+    /// reference design preference). [`ClkGpio::Gpio0`] is **invalid**
+    /// for this mode: GPIO0 function 5 is `EMAC_TX_CLK`, an input pad.
+    ///
+    /// Coexistence note: ESP32 errata CLK-3.22 — the APLL clock signal
+    /// emitted on the GPIO pad is corrupted by on-chip RF noise during
+    /// WiFi/BT transmission. This mode is unsafe with active radio;
+    /// boards needing Ethernet + WiFi should use [`Self::External`].
     InternalApll {
-        /// GPIO for clock output (only 0, 16, or 17).
+        /// GPIO for clock output. Must be `Gpio16` or `Gpio17`.
         gpio: ClkGpio,
     },
-    /// External 50 MHz clock from PHY crystal.
+    /// External 50 MHz clock fed in from a PHY crystal or oscillator.
     ///
-    /// Required for Ethernet + WiFi coexistence (immune to on-chip noise).
+    /// Valid GPIO choice: [`ClkGpio::Gpio0`] only — that is the only
+    /// pad whose function 5 (`EMAC_TX_CLK`) is an input. `Gpio16` /
+    /// `Gpio17` are **invalid** here.
+    ///
+    /// Required for Ethernet + WiFi coexistence (immune to the
+    /// CLK-3.22 errata since the clock never leaves the PHY domain).
     External {
-        /// GPIO for clock input (only 0, 16, or 17).
+        /// GPIO for clock input. Must be `Gpio0`.
         gpio: ClkGpio,
     },
 }
 
-/// GPIO pins that can carry the EMAC RMII reference clock.
+/// GPIO pins that can carry the EMAC RMII reference clock on ESP32.
 ///
-/// Only GPIO0, GPIO16, and GPIO17 support EMAC clock I/O on ESP32.
+/// Direction is fixed by the IO_MUX function 5 wiring:
+///
+/// - [`Self::Gpio0`] — `EMAC_TX_CLK`, input only — pair with
+///   [`RmiiClockConfig::External`].
+/// - [`Self::Gpio16`] — `EMAC_CLK_OUT` (0°), output only — pair with
+///   [`RmiiClockConfig::InternalApll`].
+/// - [`Self::Gpio17`] — `EMAC_CLK_OUT_180` (180°), output only — pair
+///   with [`RmiiClockConfig::InternalApll`]. Most common on LAN8720A.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ClkGpio {
-    /// GPIO0 — also used for boot strapping, use with caution.
+    /// GPIO0 — `EMAC_TX_CLK` input. Also a boot-strapping pin, take
+    /// care that the external oscillator does not violate boot timing.
     Gpio0,
-    /// GPIO16 — EMAC_CLK_OUT (0° phase).
+    /// GPIO16 — `EMAC_CLK_OUT` (0° phase).
     Gpio16,
-    /// GPIO17 — EMAC_CLK_OUT_180 (180° phase, most common for LAN8720A).
+    /// GPIO17 — `EMAC_CLK_OUT_180` (180° phase, most common for LAN8720A).
     Gpio17,
 }
 

@@ -87,6 +87,35 @@ For the embassy-net path see [`embassy::EmacDriver`](src/embassy.rs)
 and the live firmware integration in
 [`testsystem-firmware-esp / src-hal/firmware/src/net/ethernet.rs`](https://github.com/jethome-iot/testsystem-firmware-esp/blob/main/src-hal/firmware/src/net/ethernet.rs).
 
+> **`Emac::default()` is intentionally not provided.** The clock and
+> pin configuration is hardware-specific and any default the crate
+> could pick (internal APLL on GPIO17, MDC/MDIO 23/18) would silently
+> mis-drive boards that expect a different layout — including any
+> design with PHY-driven external clock or MDC/MDIO routed elsewhere.
+> Always construct an explicit `EmacConfig`.
+
+## RMII clock modes
+
+ESP32 supports two mutually exclusive RMII reference-clock modes. The
+choice is dictated by the board layout — `Emac::init` rejects mismatched
+GPIO selections with `EmacError::InvalidConfig`.
+
+| Mode | GPIO | Direction | When to use | Caveat |
+| --- | --- | --- | --- | --- |
+| `InternalApll { Gpio16 }` | 16 | output (`EMAC_CLK_OUT`, 0°) | dev boards where the MCU drives the PHY's REF_CLK pin | Errata CLK-3.22 — clock pad is corrupted by RF noise during WiFi/BT TX. Avoid if the radio is active. |
+| `InternalApll { Gpio17 }` | 17 | output (`EMAC_CLK_OUT_180`, 180°) | LAN8720A reference design — phase shift improves RX setup margin | Same CLK-3.22 caveat. |
+| `External { Gpio0 }` | 0 | input (`EMAC_TX_CLK`) | production designs with a PHY crystal / oscillator (e.g. JXD-CPU-E1ETH); required for Ethernet + WiFi coexistence | GPIO0 is also the boot-strapping pin — make sure the oscillator level at reset matches the boot-mode requirement. |
+
+`InternalApll { Gpio0 }` and `External { Gpio16/17 }` are
+hardware-impossible on ESP32 (function 5 direction is fixed per pad)
+and rejected at init time.
+
+> **TODO (deferred):** the `gpio` field of `RmiiClockConfig::External`
+> is effectively a unit since GPIO0 is the only valid input pad; once
+> the rest of the API is revisited it should become a unit variant.
+> For `InternalApll`, `Gpio16` vs `Gpio17` is a real choice (phase),
+> so it stays parameterised.
+
 ## Hardware bring-up sequence
 
 `Emac::init` follows the canonical ESP32 GMAC sequence — every step is
