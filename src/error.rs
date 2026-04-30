@@ -8,8 +8,13 @@
 #[non_exhaustive]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum EmacError {
-    /// MDIO operation timed out.
+    /// MDIO operation timed out (no PHY response within the SMI window).
     Timeout,
+    /// DMA software reset (`DMABUSMODE.SWR`) did not self-clear within
+    /// the [`crate::reset::ResetController`] timeout. Distinct from
+    /// [`Self::Timeout`] so callers can tell SMI-bus errors apart from
+    /// DMA-controller stuckness.
+    DmaResetTimeout,
     /// DMA descriptor or buffer error.
     DmaError,
     /// Invalid configuration (bad pin, clock, etc.).
@@ -39,7 +44,7 @@ pub enum EmacError {
 impl From<crate::reset::ResetError> for EmacError {
     fn from(e: crate::reset::ResetError) -> Self {
         match e {
-            crate::reset::ResetError::Timeout => EmacError::Timeout,
+            crate::reset::ResetError::Timeout => EmacError::DmaResetTimeout,
         }
     }
 }
@@ -68,5 +73,17 @@ mod tests {
         let err = EmacError::DmaError;
         let cloned = err;
         assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn reset_timeout_maps_to_dma_reset_timeout_not_mdio_timeout() {
+        // Regression: previously `From<ResetError>` collapsed DMA reset
+        // timeouts into the MDIO-flavoured `EmacError::Timeout`,
+        // making the two indistinguishable for API consumers. They
+        // are distinct hardware failure modes — keep the conversion
+        // routed at the dedicated variant.
+        let mapped: EmacError = crate::reset::ResetError::Timeout.into();
+        assert_eq!(mapped, EmacError::DmaResetTimeout);
+        assert_ne!(mapped, EmacError::Timeout);
     }
 }

@@ -253,8 +253,11 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         // 7. Software reset of the DMA controller. `ResetController::new`
         //    uses the canonical `crate::reset::SOFT_RESET_TIMEOUT_MS`
         //    default — single source of truth for the reset window.
+        //    `ResetError::Timeout` converts to `EmacError::DmaResetTimeout`
+        //    via the `From` impl, so callers can distinguish DMA-stuck
+        //    from MDIO timeouts.
         let mut reset_ctrl = ResetController::new(BorrowedDelay(delay));
-        reset_ctrl.soft_reset().map_err(|_| EmacError::Timeout)?;
+        reset_ctrl.soft_reset()?;
 
         // 8. MAC configuration defaults: 100 Mbps full duplex, port select,
         //    auto pad/CRC strip, jabber + watchdog disabled.
