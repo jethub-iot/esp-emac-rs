@@ -256,7 +256,7 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         let mut reset_ctrl = ResetController::new(BorrowedDelay(delay));
         reset_ctrl.soft_reset().map_err(|_| EmacError::Timeout)?;
 
-        // 7. MAC configuration defaults: 100 Mbps full duplex, port select,
+        // 8. MAC configuration defaults: 100 Mbps full duplex, port select,
         //    auto pad/CRC strip, jabber + watchdog disabled.
         let mac_cfg = config::PORT_SELECT
             | config::SPEED_100
@@ -270,7 +270,7 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         mac_regs::set_frame_filter(frame_filter::PASS_ALL_MULTICAST);
         mac_regs::set_hash_table(0);
 
-        // 8. DMA bus mode and operation mode.
+        // 9. DMA bus mode and operation mode.
         //
         // ATDS = enhanced 8-word descriptor layout (32 bytes per
         // descriptor). Our `dma::descriptor::{TxDescriptor,
@@ -286,16 +286,16 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         dma_regs::disable_all_interrupts();
         dma_regs::clear_all_interrupts();
 
-        // 9. Descriptor chains. Returns physical base addresses suitable for
-        //    DMARXBASEADDR / DMATXBASEADDR.
+        // 10. Descriptor chains. Returns physical base addresses suitable for
+        //     DMARXBASEADDR / DMATXBASEADDR.
         let (rx_base, tx_base) = self.dma.init();
         dma_regs::set_rx_desc_list_addr(rx_base);
         dma_regs::set_tx_desc_list_addr(tx_base);
 
-        // 10. Programme the MAC address into ADDR0H / ADDR0L (with AE bit).
-        // The internal filter latch on this Synopsys GMAC fires on the LOW
-        // write — `regs::mac::set_mac_address` writes HIGH first to keep
-        // the AE bit, then LOW to trigger the latch.
+        // 11. Programme the MAC address into ADDR0H / ADDR0L (with AE bit).
+        //     The internal filter latch on this Synopsys GMAC fires on the
+        //     LOW write — `regs::mac::set_mac_address` writes HIGH first to
+        //     keep the AE bit, then LOW to trigger the latch.
         crate::regs::mac::set_mac_address(&self.mac_address);
 
         self.state = EmacState::Initialized;
