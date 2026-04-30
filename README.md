@@ -25,7 +25,8 @@ and run on the host (`cargo test --target $HOST_TARGET`), which is how
   per-buffer length are const generics so the entire packet memory
   layout is static; nothing on the heap.
 * `EmacDriver` — `embassy_net_driver::Driver` adaptor (feature
-  `embassy-net`). Tokens borrow into a fixed buffer, no allocations.
+  `embassy-net`). Tokens copy frames through a stack-allocated buffer
+  on every `consume`; no heap allocations.
 * `EspMdio` — Station Management (SMI / MDIO) controller. Implements
   `eth_mdio_phy::MdioBus` (feature `mdio-phy`) so any PHY driver
   written against that trait Just Works.
@@ -42,7 +43,7 @@ and run on the host (`cargo test --target $HOST_TARGET`), which is how
 ## Quick start (bare metal + LAN8720A)
 
 ```rust no_run
-use esp_hal::{delay::Delay, rng::Rng};
+use esp_hal::delay::Delay;
 use esp_emac::{
     Emac, EmacConfig, RmiiClockConfig, RmiiPins, ClkGpio,
 };

@@ -4,8 +4,13 @@
 //! DMA software reset state machine.
 //!
 //! Wraps the `DMABUSMODE.SWR` bit-poll loop in a small struct that takes
-//! a [`DelayNs`] implementation, so the same routine works equally well
-//! from a blocking or async context.
+//! a [`DelayNs`] implementation. Note that
+//! [`embedded_hal::delay::DelayNs`] is a **blocking** delay trait — the
+//! poll loop will busy-wait the calling task until the controller
+//! self-clears or the timeout expires. Callers from async contexts
+//! should either accept that block (the reset finishes in a few
+//! microseconds on real hardware) or pass a `DelayNs` implementation
+//! whose `delay_us` yields to the executor.
 
 use embedded_hal::delay::DelayNs;
 
