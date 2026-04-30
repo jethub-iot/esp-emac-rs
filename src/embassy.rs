@@ -252,13 +252,19 @@ impl EmacDriverState {
         }
     }
 
-    /// Read the DMA status register, clear the interrupts, and wake any
-    /// tasks waiting on RX/TX/link.
+    /// Read the DMA status register, clear the interrupts, and wake
+    /// any tasks waiting on RX or TX.
     ///
-    /// Intended to be called from the EMAC ISR. Touches only memory-mapped
-    /// EMAC registers and the embedded wakers, so there is no aliasing
-    /// concern with the [`EmacDriver`] holding a raw pointer to the
-    /// [`Emac`] state.
+    /// Does **not** wake `link_waker` — link state isn't reflected in
+    /// `DMASTATUS` and is updated separately by whatever PHY-polling
+    /// task calls [`set_link_up`](Self::set_link_up) /
+    /// [`set_link_down`](Self::set_link_down). That path takes care
+    /// of waking link-state observers itself.
+    ///
+    /// Intended to be called from the EMAC ISR. Touches only memory-
+    /// mapped EMAC registers and the embedded wakers, so there is no
+    /// aliasing concern with the [`EmacDriver`] holding a raw pointer
+    /// to the [`Emac`] state.
     pub fn handle_emac_interrupt(&self) {
         let dmastat = crate::regs::dma::BASE + crate::regs::dma::DMASTATUS;
         // SAFETY: DMASTATUS is a known-valid 32-bit memory-mapped register.

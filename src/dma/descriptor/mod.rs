@@ -3,17 +3,30 @@
 
 //! TX and RX DMA descriptor structures.
 //!
-//! Each descriptor is 4 x u32 (16 bytes) in the simplified ESP32 layout:
+//! The crate runs the **enhanced 8-word descriptor layout** (32 bytes
+//! per descriptor) selected by `DMABUSMODE.ATDS = 1`. Words 4-7 carry
+//! the extended status / timestamp fields; the CPU never reads them
+//! today, but they exist in memory so the DMA engine doesn't stomp
+//! adjacent descriptors when chained at a 32-byte stride.
 //!
-//! | Word | TX (TDES)          | RX (RDES)          |
-//! |------|--------------------|--------------------|
-//! | 0    | Status / Control   | Status             |
-//! | 1    | Buffer size, flags | Buffer size, flags |
-//! | 2    | Buffer pointer     | Buffer pointer     |
-//! | 3    | Next descriptor    | Next descriptor    |
+//! | Word | TX (TDES)              | RX (RDES)              |
+//! |------|------------------------|------------------------|
+//! | 0    | Status / control       | Status                 |
+//! | 1    | Buffer 1 size + flags  | Buffer 1 size + flags  |
+//! | 2    | Buffer 1 address       | Buffer 1 address       |
+//! | 3    | Next-descriptor addr   | Next-descriptor addr   |
+//! | 4    | Reserved / extended    | Extended status        |
+//! | 5    | Reserved               | Reserved               |
+//! | 6    | Timestamp low          | Timestamp low          |
+//! | 7    | Timestamp high         | Timestamp high         |
 //!
 //! The OWN bit (bit 31 of word 0) governs ownership: when set the DMA
 //! engine owns the descriptor; when clear the CPU may access it.
+//!
+//! The legacy 4-word/16-byte layout (`ATDS = 0`) isn't supported by
+//! this crate — the enhanced layout matches what `ph-esp32-mac` /
+//! ESP-IDF use and is required for the timestamp / IPv4 checksum
+//! offload features even if the crate doesn't currently surface them.
 
 pub mod bits;
 
