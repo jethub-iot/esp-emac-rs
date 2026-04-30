@@ -488,16 +488,24 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
 
     /// Clear DMA status flags via write-1-to-clear.
     ///
-    /// Writes `raw` straight into `DMASTATUS`. Pass the raw register
-    /// snapshot you previously read so every W1C bit (including ones
-    /// not modeled in [`InterruptStatus`] such as `ERI`/`ETI`/`RWT`)
-    /// is acknowledged in a single write.
+    /// Writes the raw register snapshot back into `DMASTATUS`,
+    /// masked against [`crate::regs::dma::status::ALL_INTERRUPTS`] so
+    /// only the documented W1C interrupt bits are touched. The
+    /// non-W1C fields in `DMASTATUS` — `RS`/`TS` (process state),
+    /// `EB` (error bits), `MMC`/`PMT`/`TTI` — are read-only and
+    /// silently ignored by the hardware on write, but masking them
+    /// keeps the contract explicit: every bit we send is something
+    /// we mean to acknowledge.
+    ///
+    /// Pass the raw snapshot you previously read so every W1C bit
+    /// (including ones not modeled in [`InterruptStatus`] such as
+    /// `ERI` / `ETI` / `RWT`) is acknowledged in a single write.
     pub fn clear_interrupts_raw(&self, raw: u32) {
         // SAFETY: write to a known-valid memory-mapped register.
         unsafe {
             core::ptr::write_volatile(
                 (crate::regs::dma::BASE + crate::regs::dma::DMASTATUS) as *mut u32,
-                raw,
+                raw & crate::regs::dma::status::ALL_INTERRUPTS,
             );
         }
     }

@@ -264,13 +264,22 @@ impl EmacDriverState {
         // SAFETY: DMASTATUS is a known-valid 32-bit memory-mapped register.
         let raw = unsafe { core::ptr::read_volatile(dmastat as *const u32) };
         let status = InterruptStatus::from_raw(raw);
-        // Write-1-to-clear using the raw snapshot, so every asserted W1C
-        // bit is acknowledged — including ones outside `InterruptStatus`
-        // such as `ERI` (bit 14), `ETI` (bit 10), `RWT` (bit 9), `TJT`
-        // (bit 3) and the EBE field. Round-tripping through `to_raw()`
-        // would silently drop those bits and risk an interrupt storm.
-        // SAFETY: same address; bits are W1C.
-        unsafe { core::ptr::write_volatile(dmastat as *mut u32, raw) };
+        // Write-1-to-clear using the raw snapshot, masked against
+        // `ALL_INTERRUPTS` so only the W1C interrupt bits are written
+        // back. This still catches every asserted W1C bit — including
+        // ones outside `InterruptStatus` such as `ERI` (bit 14), `ETI`
+        // (bit 10), `RWT` (bit 9), `TJT` (bit 3) — but excludes the
+        // read-only fields (`RS`/`TS`/`EB`/`MMC`/`PMT`/`TTI`) so we
+        // never write garbage at addresses the hardware doesn't expect.
+        // Round-tripping through `to_raw()` would silently drop those
+        // bits and risk an interrupt storm.
+        // SAFETY: same address; masked write hits only W1C bits.
+        unsafe {
+            core::ptr::write_volatile(
+                dmastat as *mut u32,
+                raw & crate::regs::dma::status::ALL_INTERRUPTS,
+            )
+        };
 
         self.irq_count.fetch_add(1, Ordering::Relaxed);
         self.last_dmastat.store(raw, Ordering::Relaxed);
