@@ -190,9 +190,19 @@ pub unsafe fn clear_bits(offset: usize, bits: u32) {
 // Composite operations (formerly ph_esp32_mac::unsafe_registers::ExtRegs)
 // =============================================================================
 
-/// Enable the EMAC peripheral clock through the DPORT block. MUST be the
-/// first thing called when bringing the EMAC up — every other register
-/// access fails or returns garbage if the peripheral is unclocked.
+/// Enable the EMAC peripheral clock through the DPORT block.
+///
+/// MUST precede any access to the EMAC register blocks themselves —
+/// `regs::mac` (`EMAC_MAC` base), `regs::dma` (`EMAC_DMA` base), and
+/// the EMAC extension registers in this module above the `Composite
+/// operations` section (`EX_CLK_CTRL`, `EX_PHYINF_CONF`, `EX_PD_SEL`,
+/// …). Reads from those return garbage and writes are silently
+/// dropped while the peripheral is unclocked.
+///
+/// Bring-up steps that touch *other* always-on blocks (RTC analog +
+/// ROM I2C for APLL programming, IO_MUX, GPIO Matrix routing) work
+/// before this call — they don't depend on the EMAC peripheral clock.
+/// See `Emac::init` for the canonical ordering.
 #[inline(always)]
 pub fn enable_peripheral_clock() {
     // SAFETY: DPORT_WIFI_CLK_EN_REG is a known-valid 32-bit register.
