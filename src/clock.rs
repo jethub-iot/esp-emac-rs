@@ -158,8 +158,15 @@ impl ApllCoefficients {
     /// Look up the coefficients that produce a 50 MHz APLL output for
     /// the given on-board crystal.
     ///
-    /// Returns `None` for crystals not in the supported set
-    /// `{26, 32, 40} MHz`. Verified results (target 50.000 MHz):
+    /// Total: infallible — the input is constrained by [`XtalFreq`],
+    /// which only enumerates crystals the crate has verified
+    /// coefficients for (`Mhz26` / `Mhz32` / `Mhz40`). Adding support
+    /// for another crystal therefore takes two concrete edits — extend
+    /// `XtalFreq` with the new variant, and add a matching arm here —
+    /// followed by a host-side unit test asserting the new arm lands
+    /// on 50 MHz.
+    ///
+    /// Verified results (target 50.000 MHz):
     ///
     /// | XTAL  | sdm2 | sdm1 | sdm0 | o_div | Computed fout |
     /// |-------|------|------|------|-------|---------------|
