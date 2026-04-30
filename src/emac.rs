@@ -22,7 +22,6 @@ use crate::interrupt::InterruptStatus;
 use crate::regs::dma::{bus_mode, operation};
 use crate::regs::mac::{config, frame_filter};
 
-const SOFT_RESET_TIMEOUT_MS: u32 = 100;
 const TX_FIFO_FLUSH_TIMEOUT_US: u32 = 100_000;
 
 // =============================================================================
@@ -235,9 +234,10 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         ext_regs::enable_clocks();
         ext_regs::power_up_ram();
 
-        // 6. Software reset of the DMA controller.
-        let mut reset_ctrl =
-            ResetController::with_timeout(BorrowedDelay(delay), SOFT_RESET_TIMEOUT_MS);
+        // 6. Software reset of the DMA controller. `ResetController::new`
+        //    uses the canonical `crate::reset::SOFT_RESET_TIMEOUT_MS`
+        //    default — single source of truth for the reset window.
+        let mut reset_ctrl = ResetController::new(BorrowedDelay(delay));
         reset_ctrl.soft_reset().map_err(|_| EmacError::Timeout)?;
 
         // 7. MAC configuration defaults: 100 Mbps full duplex, port select,
