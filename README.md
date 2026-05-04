@@ -111,12 +111,24 @@ use esp_emac::EmacDefault;
 use eth_mdio_phy::{Duplex as PhyDuplex, PhyDriver, Speed as PhySpeed};
 use eth_phy_lan87xx::PhyLan87xx;
 
-use static_cell::StaticCell;
-
 // 1. Static storage — DMA holds raw pointers into the `Emac` instance,
-//    so it must live in `static` and never move. `StaticCell` lets us
-//    avoid `static mut` + the accompanying `unsafe { addr_of_mut!(...) }`.
-static EMAC: StaticCell<EmacDefault> = StaticCell::new();
+//    so it must live in `static` and never move. `Emac::new` (and
+//    therefore `EmacDefault::new`) is a `const fn`, so the value is
+//    built at compile time and lives in BSS — zero runtime stack cost
+//    on boot. The default ring sizing is currently 10 RX / 10 TX /
+//    1600-byte buffers (~32 KiB), sourced from `DEFAULT_RX` /
+//    `DEFAULT_TX` / `DEFAULT_BUF`. We deliberately do NOT wrap it in
+//    `StaticCell::init(EmacDefault::new(...))` — that pattern would
+//    risk materialising the 32 KiB struct on the caller's stack
+//    before moving it into the cell. The `static mut` form below
+//    avoids that hazard at the cost of one well-isolated `unsafe`.
+static mut EMAC: EmacDefault = EmacDefault::new(EmacConfig {
+    clock: RmiiClockConfig::InternalApll {
+        gpio: ClkGpio::Gpio17,
+        xtal: XtalFreq::Mhz40,
+    },
+    pins: RmiiPins { mdc: 23, mdio: 18 },
+});
 static EMAC_STATE: EmacDriverState = EmacDriverState::new();
 
 // 2. Bind the EMAC interrupt to the driver's state.
@@ -142,14 +154,9 @@ async fn main(spawner: Spawner) {
     let mut delay = Delay::new();
     let rng = Rng::new();
 
-    // 3. Bring up MAC + PHY.
-    let emac = EMAC.init(EmacDefault::new(EmacConfig {
-        clock: RmiiClockConfig::InternalApll {
-            gpio: ClkGpio::Gpio17,
-            xtal: XtalFreq::Mhz40,
-        },
-        pins: RmiiPins { mdc: 23, mdio: 18 },
-    }));
+    // 3. Bring up MAC + PHY. SAFETY: EMAC is touched only here — single
+    //    owner — so no aliasing.
+    let emac = unsafe { &mut *core::ptr::addr_of_mut!(EMAC) };
     emac.set_mac_address([0x00, 0x70, 0x07, 0x24, 0x3B, 0x87]);
     emac.init(&mut delay).expect("EMAC init");
     emac.bind_interrupt(emac_interrupt_handler);

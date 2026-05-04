@@ -51,9 +51,19 @@ const MAC_ADDRESS: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 const PHY_ADDR: u8 = 1;
 
 /// EMAC instance — DMA holds raw pointers into this, so it must live in
-/// `static` storage and never move. `StaticCell` gives us a `&'static
-/// mut EmacDefault` without `static mut` + `unsafe { addr_of_mut!(...) }`.
-static EMAC: StaticCell<EmacDefault> = StaticCell::new();
+/// `static` storage and never move. `EmacDefault::new` is a `const fn`
+/// so the value is built at compile time and lives in BSS; no runtime
+/// stack temporary on boot. The default ring sizing is ~32 KiB
+/// (`DEFAULT_RX * BUF` + `DEFAULT_TX * BUF` plus descriptor rings) —
+/// using `StaticCell::init(EmacDefault::new(..))` instead would risk
+/// landing that whole struct on the calling task's stack frame.
+static mut EMAC: EmacDefault = EmacDefault::new(EmacConfig {
+    clock: RmiiClockConfig::InternalApll {
+        gpio: ClkGpio::Gpio17,
+        xtal: XtalFreq::Mhz40,
+    },
+    pins: RmiiPins { mdc: 23, mdio: 18 },
+});
 
 /// Shared state between the ISR and the embassy-net Driver.
 static EMAC_STATE: EmacDriverState = EmacDriverState::new();
@@ -82,13 +92,8 @@ async fn main(spawner: Spawner) {
     let mut delay = Delay::new();
     let rng = Rng::new();
 
-    let emac = EMAC.init(EmacDefault::new(EmacConfig {
-        clock: RmiiClockConfig::InternalApll {
-            gpio: ClkGpio::Gpio17,
-            xtal: XtalFreq::Mhz40,
-        },
-        pins: RmiiPins { mdc: 23, mdio: 18 },
-    }));
+    // SAFETY: `EMAC` is touched only here at init time — single owner.
+    let emac = unsafe { &mut *core::ptr::addr_of_mut!(EMAC) };
 
     emac.set_mac_address(MAC_ADDRESS);
     emac.init(&mut delay).expect("EMAC init");

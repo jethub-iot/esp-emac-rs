@@ -22,13 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
-- README quick-start, `src/lib.rs` crate-level rustdoc, `src/embassy.rs`
-  module-level rustdoc, and `examples/embassy_net_lan8720a.rs` all
-  switched from `static mut EMAC: Emac<...> = Emac::new(...)` +
-  `unsafe { &mut *core::ptr::addr_of_mut!(EMAC) }` to the safer
-  `static EMAC: StaticCell<EmacDefault> = StaticCell::new();` +
-  `EMAC.init(EmacDefault::new(...))` pattern. No `static mut` and no
-  `unsafe` block in the user-facing example.
 - Driver construction sites use `EmacDefaultDriver::new(emac, &state)`
   (the type alias's inherent `new`) instead of `EmacDriver::new(...)`,
   so the call site doesn't repeat the const generics.
@@ -40,13 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is that the ISR-bound instance must match the one passed to
   `EmacDriver::new`. Replaces the previous, overstated "per-process
   singleton" wording.
-
-### Internal
-
-- `static_cell = "2"` added to host dev-dependencies (`cfg(not(target_os
-  = "none"))`) so `cargo test --doc --features embassy-net` resolves
-  the `StaticCell` import in the lib.rs doctest. Pure-Rust crate, no
-  transitive cost.
+- Recommend `static mut EMAC: EmacDefault = EmacDefault::new(...)` +
+  `unsafe { &mut *core::ptr::addr_of_mut!(EMAC) }` as the canonical
+  storage pattern. `Emac::new` is `const fn`, so the value lives in
+  BSS — no runtime stack involvement on boot. A
+  `StaticCell::init(EmacDefault::new(...))` wrapper would risk
+  materialising the ~32 KiB `EmacDefault` on the calling task's
+  stack frame before moving it into the cell, which is enough to
+  overflow tight ESP32 task stacks. Documentation in README,
+  `src/lib.rs`, `src/embassy.rs`, and `examples/embassy_net_lan8720a.rs`
+  all use this pattern with an explanatory comment.
 
 ### Notes
 

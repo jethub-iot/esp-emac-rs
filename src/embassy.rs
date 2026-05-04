@@ -53,15 +53,22 @@
 //!     embassy::{EmacDefaultDriver, EmacDriverState},
 //! };
 //! use esp_hal::interrupt::{InterruptHandler, Priority};
-//! use static_cell::StaticCell;
 //!
-//! // `EmacDefault` is the default ring sizing — currently 10 RX / 10
-//! // TX / 1600-byte buffers, sourced from the `DEFAULT_RX` /
-//! // `DEFAULT_TX` / `DEFAULT_BUF` canonical constants. `StaticCell`
-//! // carries the `Emac` instance so we get a `&'static mut EmacDefault`
-//! // without having to write `static mut` + the accompanying
-//! // `unsafe { addr_of_mut!(...) }` dance.
-//! static EMAC: StaticCell<EmacDefault> = StaticCell::new();
+//! // `EmacDefault::new` is a `const fn`, so the EMAC value is built at
+//! // compile time and lives in BSS — zero runtime stack involvement on
+//! // boot. The default ring sizing is currently 10 RX / 10 TX /
+//! // 1600-byte buffers (~32 KiB), sourced from `DEFAULT_RX` /
+//! // `DEFAULT_TX` / `DEFAULT_BUF`. A `StaticCell::init(EmacDefault::new(..))`
+//! // pattern would risk landing that 32 KiB on the caller's stack
+//! // before the move into static storage; the `static mut` form is
+//! // smaller, deterministic and avoids that hazard.
+//! static mut EMAC: EmacDefault = EmacDefault::new(EmacConfig {
+//!     clock: RmiiClockConfig::InternalApll {
+//!         gpio: ClkGpio::Gpio17,
+//!         xtal: XtalFreq::Mhz40,
+//!     },
+//!     pins: RmiiPins { mdc: 23, mdio: 18 },
+//! });
 //! static EMAC_STATE: EmacDriverState = EmacDriverState::new();
 //!
 //! // 1. ISR — must service DMASTATUS and wake stack tasks. The
@@ -75,13 +82,8 @@
 //! // 2. Bring-up + driver wiring.
 //! # fn example() -> Result<(), esp_emac::EmacError> {
 //! # let mut delay = esp_hal::delay::Delay::new();
-//! let emac = EMAC.init(EmacDefault::new(EmacConfig {
-//!     clock: RmiiClockConfig::InternalApll {
-//!         gpio: ClkGpio::Gpio17,
-//!         xtal: XtalFreq::Mhz40,
-//!     },
-//!     pins: RmiiPins { mdc: 23, mdio: 18 },
-//! }));
+//! // SAFETY: `EMAC` is touched only here — single owner — so no aliasing.
+//! let emac = unsafe { &mut *core::ptr::addr_of_mut!(EMAC) };
 //! emac.set_mac_address([0x00, 0x70, 0x07, 0x24, 0x3B, 0x87]);
 //! emac.init(&mut delay)?;
 //! // ... PHY init + link wait + set_speed/set_duplex omitted ...
