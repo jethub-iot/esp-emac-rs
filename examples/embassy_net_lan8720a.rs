@@ -54,7 +54,8 @@ const PHY_ADDR: u8 = 1;
 /// `static` storage and never move. `EmacDefault::new` is a `const fn`
 /// so the value is built at compile time and lives in BSS; no runtime
 /// stack temporary on boot. The default ring sizing is ~32 KiB
-/// (`DEFAULT_RX * BUF` + `DEFAULT_TX * BUF` plus descriptor rings) —
+/// (`DEFAULT_RX * DEFAULT_BUF` + `DEFAULT_TX * DEFAULT_BUF` plus
+/// descriptor rings) —
 /// using `StaticCell::init(EmacDefault::new(..))` instead would risk
 /// landing that whole struct on the calling task's stack frame.
 static mut EMAC: EmacDefault = EmacDefault::new(EmacConfig {
