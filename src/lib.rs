@@ -24,18 +24,34 @@
 //! # #[cfg(feature = "embassy-net")]
 //! # mod __doc {
 //! use esp_emac::config::{ClkGpio, EmacConfig, RmiiClockConfig, RmiiPins, XtalFreq};
-//! use esp_emac::emac::Emac;
+//! use esp_emac::EmacDefault;
 //! use esp_emac::embassy::EmacDriverState;
 //!
-//! static mut EMAC: Emac<10, 10, 1600> = Emac::new(EmacConfig {
+//! // `Emac::new` (and therefore `EmacDefault::new`) is a `const fn`.
+//! // Storing the EMAC in a `static mut` gives compile-time BSS init
+//! // — no runtime stack temporary, deterministic on cold boot.
+//! //
+//! // The default ring sizing is currently 10 RX / 10 TX / 1600-byte
+//! // buffers (~32 KiB), sourced from `DEFAULT_RX` / `DEFAULT_TX` /
+//! // `DEFAULT_BUF`. At that size a `StaticCell::init(EmacDefault::new(..))`
+//! // pattern would risk materialising the full struct on the caller's
+//! // stack before moving it into static storage; `static mut` avoids
+//! // that path entirely.
+//! static mut EMAC: EmacDefault = EmacDefault::new(EmacConfig {
 //!     clock: RmiiClockConfig::InternalApll {
 //!         gpio: ClkGpio::Gpio17,
 //!         xtal: XtalFreq::Mhz40,
 //!     },
 //!     pins: RmiiPins { mdc: 23, mdio: 18 },
 //! });
-//!
 //! static EMAC_STATE: EmacDriverState = EmacDriverState::new();
+//!
+//! // In `main`, take the `&'static mut` once. SAFETY: `EMAC` is touched
+//! // only here — single owner — so there is no aliasing.
+//! # fn doc() {
+//! let _emac: &'static mut EmacDefault =
+//!     unsafe { &mut *core::ptr::addr_of_mut!(EMAC) };
+//! # }
 //! # }
 //! ```
 //!

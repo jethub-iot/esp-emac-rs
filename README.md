@@ -103,22 +103,32 @@ use embedded_hal::delay::DelayNs;
 use esp_hal::{delay::Delay, interrupt::Priority, rng::Rng};
 
 use esp_emac::config::{ClkGpio, EmacConfig, RmiiClockConfig, RmiiPins, XtalFreq};
-use esp_emac::emac::{Duplex as EmacDuplex, Emac, Speed as EmacSpeed};
-use esp_emac::embassy::{EmacDriver, EmacDriverState};
+use esp_emac::emac::{Duplex as EmacDuplex, Speed as EmacSpeed};
+use esp_emac::embassy::{EmacDefaultDriver, EmacDriverState};
 use esp_emac::mdio::EspMdio;
+use esp_emac::EmacDefault;
 
 use eth_mdio_phy::{Duplex as PhyDuplex, PhyDriver, Speed as PhySpeed};
 use eth_phy_lan87xx::PhyLan87xx;
 
-// 1. Static state — DMA holds raw pointers, must outlive the driver.
-static mut EMAC: Emac<10, 10, 1600> = Emac::new(EmacConfig {
+// 1. Static storage — DMA holds raw pointers into the `Emac` instance,
+//    so it must live in `static` and never move. `Emac::new` (and
+//    therefore `EmacDefault::new`) is a `const fn`, so the value is
+//    built at compile time and lives in BSS — zero runtime stack cost
+//    on boot. The default ring sizing is currently 10 RX / 10 TX /
+//    1600-byte buffers (~32 KiB), sourced from `DEFAULT_RX` /
+//    `DEFAULT_TX` / `DEFAULT_BUF`. We deliberately do NOT wrap it in
+//    `StaticCell::init(EmacDefault::new(...))` — that pattern would
+//    risk materialising the 32 KiB struct on the caller's stack
+//    before moving it into the cell. The `static mut` form below
+//    avoids that hazard at the cost of one well-isolated `unsafe`.
+static mut EMAC: EmacDefault = EmacDefault::new(EmacConfig {
     clock: RmiiClockConfig::InternalApll {
         gpio: ClkGpio::Gpio17,
         xtal: XtalFreq::Mhz40,
     },
     pins: RmiiPins { mdc: 23, mdio: 18 },
 });
-
 static EMAC_STATE: EmacDriverState = EmacDriverState::new();
 
 // 2. Bind the EMAC interrupt to the driver's state.
@@ -128,7 +138,7 @@ fn emac_interrupt_handler() {
 }
 
 #[embassy_executor::task]
-async fn net_task(mut runner: Runner<'static, EmacDriver<'static, 10, 10, 1600>>) {
+async fn net_task(mut runner: Runner<'static, EmacDefaultDriver<'static>>) {
     runner.run().await
 }
 
@@ -144,8 +154,8 @@ async fn main(spawner: Spawner) {
     let mut delay = Delay::new();
     let rng = Rng::new();
 
-    // 3. Bring up MAC + PHY.
-    // SAFETY: EMAC is touched only here at init time.
+    // 3. Bring up MAC + PHY. SAFETY: EMAC is touched only here — single
+    //    owner — so no aliasing.
     let emac = unsafe { &mut *core::ptr::addr_of_mut!(EMAC) };
     emac.set_mac_address([0x00, 0x70, 0x07, 0x24, 0x3B, 0x87]);
     emac.init(&mut delay).expect("EMAC init");
@@ -177,8 +187,12 @@ async fn main(spawner: Spawner) {
 
     emac.start().expect("EMAC start");
 
-    // 5. Plumb into embassy-net.
-    let driver = EmacDriver::new(emac, &EMAC_STATE);
+    // 5. Plumb into embassy-net. `EmacDefaultDriver` is a type alias
+    //    whose inherent `new` is `EmacDriver::new` — keeps the call
+    //    site free of the const-generic ceremony (currently
+    //    `<10, 10, 1600>`, sourced from `DEFAULT_RX` / `DEFAULT_TX` /
+    //    `DEFAULT_BUF`).
+    let driver = EmacDefaultDriver::new(emac, &EMAC_STATE);
     let net_seed = rng.random() as u64 | ((rng.random() as u64) << 32);
 
     static RESOURCES: static_cell::StaticCell<StackResources<8>> =
