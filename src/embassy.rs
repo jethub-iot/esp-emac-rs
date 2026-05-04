@@ -55,10 +55,12 @@
 //! use esp_hal::interrupt::{InterruptHandler, Priority};
 //! use static_cell::StaticCell;
 //!
-//! // `EmacDefault` is `Emac<10, 10, 1600>` — the default ring sizing.
-//! // `StaticCell` carries the `Emac` instance so we get a `&'static mut
-//! // EmacDefault` without having to write `static mut` + the
-//! // accompanying `unsafe { addr_of_mut!(...) }` dance.
+//! // `EmacDefault` is the default ring sizing — currently 10 RX / 10
+//! // TX / 1600-byte buffers, sourced from the `DEFAULT_RX` /
+//! // `DEFAULT_TX` / `DEFAULT_BUF` canonical constants. `StaticCell`
+//! // carries the `Emac` instance so we get a `&'static mut EmacDefault`
+//! // without having to write `static mut` + the accompanying
+//! // `unsafe { addr_of_mut!(...) }` dance.
 //! static EMAC: StaticCell<EmacDefault> = StaticCell::new();
 //! static EMAC_STATE: EmacDriverState = EmacDriverState::new();
 //!
@@ -87,7 +89,8 @@
 //! emac.start()?;
 //! // `EmacDefaultDriver` is a type alias whose inherent `new` is the
 //! // same `EmacDriver::new` constructor — keeps the call site free of
-//! // the `<10, 10, 1600>` ceremony.
+//! // the const-generic ceremony (currently `<10, 10, 1600>`, sourced
+//! // from `DEFAULT_RX` / `DEFAULT_TX` / `DEFAULT_BUF`).
 //! let driver = EmacDefaultDriver::new(emac, &EMAC_STATE);
 //! // Hand `driver` to embassy_net::new() / Stack.
 //! # Ok(()) }

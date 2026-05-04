@@ -28,7 +28,9 @@
 //! use esp_emac::embassy::EmacDriverState;
 //! use static_cell::StaticCell;
 //!
-//! // `EmacDefault` is the `Emac<10, 10, 1600>` alias. `StaticCell`
+//! // `EmacDefault` is the default ring sizing — currently 10 RX / 10
+//! // TX / 1600-byte buffers, sourced from `DEFAULT_RX` / `DEFAULT_TX` /
+//! // `DEFAULT_BUF` (the canonical constants for retuning). `StaticCell`
 //! // gives us a `&'static mut EmacDefault` without `static mut` +
 //! // an `unsafe { addr_of_mut!(...) }` dance.
 //! static EMAC: StaticCell<EmacDefault> = StaticCell::new();

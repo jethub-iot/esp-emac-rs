@@ -182,7 +182,9 @@ async fn main(spawner: Spawner) {
 
     // 5. Plumb into embassy-net. `EmacDefaultDriver` is a type alias
     //    whose inherent `new` is `EmacDriver::new` — keeps the call
-    //    site free of the `<10, 10, 1600>` ceremony.
+    //    site free of the const-generic ceremony (currently
+    //    `<10, 10, 1600>`, sourced from `DEFAULT_RX` / `DEFAULT_TX` /
+    //    `DEFAULT_BUF`).
     let driver = EmacDefaultDriver::new(emac, &EMAC_STATE);
     let net_seed = rng.random() as u64 | ((rng.random() as u64) << 32);
 

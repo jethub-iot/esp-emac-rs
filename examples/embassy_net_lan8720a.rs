@@ -126,9 +126,11 @@ async fn main(spawner: Spawner) {
 
     emac.start().expect("EMAC start");
 
-    // `EmacDefaultDriver` is the type alias for `EmacDriver<'_, 10, 10,
-    // 1600>` — its inherent `new` is the same constructor, just without
-    // having to spell out the const generics again at the call site.
+    // `EmacDefaultDriver` is the type alias for the default ring sizing
+    // — currently `EmacDriver<'_, 10, 10, 1600>`, with the const
+    // generics sourced from `DEFAULT_RX` / `DEFAULT_TX` / `DEFAULT_BUF`.
+    // Its inherent `new` is the same constructor, just without having
+    // to spell out the const generics again at the call site.
     let driver = EmacDefaultDriver::new(emac, &EMAC_STATE);
     let net_seed = rng.random() as u64 | ((rng.random() as u64) << 32);
 
