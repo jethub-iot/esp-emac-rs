@@ -8,6 +8,24 @@
 //! and is intended to live in `static` storage so the EMAC ISR can
 //! reach it.
 //!
+//! # Singleton design
+//!
+//! Both [`Emac`] and [`EmacDriverState`] are designed as **per-process
+//! singletons**:
+//!
+//! - The ESP32 has exactly one built-in EMAC peripheral; `Emac::init`
+//!   touches global MMIO that no second instance could share. Two
+//!   `Emac` instances would compile but step on each other at runtime.
+//! - `EmacDriverState` is referenced from the EMAC ISR symbol bound
+//!   via [`crate::Emac::bind_interrupt`]. The ISR has no per-instance
+//!   context — it dereferences a `static` symbol — so introducing a
+//!   second `EmacDriverState` instance would silently route interrupts
+//!   to the wrong one.
+//!
+//! Place both in `static` storage. Construct exactly one
+//! [`EmacDriver`] per `Emac` (the borrow checker enforces single
+//! ownership through `&'d mut Emac<...>`).
+//!
 //! # Usage
 //!
 //! The driver is non-functional until the EMAC ISR services
@@ -20,18 +38,18 @@
 //!
 //! ```ignore
 //! use esp_emac::{
-//!     Emac, EmacConfig, RmiiClockConfig, RmiiPins, ClkGpio, XtalFreq,
-//!     embassy::{EmacDriver, EmacDriverState},
+//!     EmacConfig, RmiiClockConfig, RmiiPins, ClkGpio, XtalFreq,
+//!     EmacDefault,
+//!     embassy::{EmacDefaultDriver, EmacDriverState},
 //! };
 //! use esp_hal::interrupt::{InterruptHandler, Priority};
+//! use static_cell::StaticCell;
 //!
-//! static mut EMAC: Emac<10, 10, 1600> = Emac::new(EmacConfig {
-//!     clock: RmiiClockConfig::InternalApll {
-//!         gpio: ClkGpio::Gpio17,
-//!         xtal: XtalFreq::Mhz40,
-//!     },
-//!     pins: RmiiPins { mdc: 23, mdio: 18 },
-//! });
+//! // `EmacDefault` is `Emac<10, 10, 1600>` — the default ring sizing.
+//! // `StaticCell` carries the `Emac` instance so we get a `&'static mut
+//! // EmacDefault` without having to write `static mut` + the
+//! // accompanying `unsafe { addr_of_mut!(...) }` dance.
+//! static EMAC: StaticCell<EmacDefault> = StaticCell::new();
 //! static EMAC_STATE: EmacDriverState = EmacDriverState::new();
 //!
 //! // 1. ISR — must service DMASTATUS and wake stack tasks.
@@ -43,13 +61,19 @@
 //! // 2. Bring-up + driver wiring.
 //! # fn example() -> Result<(), esp_emac::EmacError> {
 //! # let mut delay = esp_hal::delay::Delay::new();
-//! let emac = unsafe { &mut *core::ptr::addr_of_mut!(EMAC) };
+//! let emac = EMAC.init(EmacDefault::new(EmacConfig {
+//!     clock: RmiiClockConfig::InternalApll {
+//!         gpio: ClkGpio::Gpio17,
+//!         xtal: XtalFreq::Mhz40,
+//!     },
+//!     pins: RmiiPins { mdc: 23, mdio: 18 },
+//! }));
 //! emac.set_mac_address([0x00, 0x70, 0x07, 0x24, 0x3B, 0x87]);
 //! emac.init(&mut delay)?;
 //! // ... PHY init + link wait + set_speed/set_duplex omitted ...
 //! emac.bind_interrupt(InterruptHandler::new(emac_isr, Priority::Priority1));
 //! emac.start()?;
-//! let driver = EmacDriver::new(emac, &EMAC_STATE);
+//! let driver: EmacDefaultDriver<'_> = EmacDriver::new(emac, &EMAC_STATE);
 //! // Hand `driver` to embassy_net::new() / Stack.
 //! # Ok(()) }
 //! ```
@@ -326,12 +350,29 @@ impl EmacDriverState {
 /// The driver holds a raw pointer to a previously-initialized
 /// [`Emac`] together with a reference to a shared [`EmacDriverState`].
 ///
+/// # Singleton
+///
+/// Construct **exactly one** `EmacDriver` per `Emac`. The borrow
+/// checker enforces that through the `&'d mut Emac<...>` argument to
+/// [`Self::new`] — as long as the `Emac` lives in `static` storage
+/// (typical pattern: a [`static_cell::StaticCell<EmacDefault>`]
+/// initialized once), the `&'static mut` returned by `StaticCell::init`
+/// is only handed to one driver and aliasing is impossible.
+///
+/// The companion [`EmacDriverState`] is also a singleton — see the
+/// module-level docs for why.
+///
+/// For the default `Emac<10, 10, 1600>` ring sizing the
+/// [`EmacDefaultDriver<'d>`](EmacDefaultDriver) alias removes the need
+/// to repeat the const generics in `embassy_executor::task` signatures.
+///
 /// # Safety
 ///
 /// The pointer is dereferenced in `Driver` impl methods. The lifetime
 /// `'d` ensures the underlying `Emac` outlives the driver, but the raw
-/// pointer means **mutable aliasing** would be unsound. Construct only
-/// one driver per `Emac` instance and let it own access until shutdown.
+/// pointer means **mutable aliasing** would be unsound. The single-
+/// ownership invariant above is what keeps that aliasing impossible
+/// in practice.
 pub struct EmacDriver<'d, const RX: usize, const TX: usize, const BUF: usize> {
     emac: *mut Emac<RX, TX, BUF>,
     state: &'d EmacDriverState,
@@ -404,6 +445,24 @@ impl<'d, const RX: usize, const TX: usize, const BUF: usize> EmacDriver<'d, RX, 
         }
     }
 }
+
+// =============================================================================
+// Convenience type aliases
+// =============================================================================
+
+/// Driver for the default `Emac<10, 10, 1600>` ring sizing.
+///
+/// Pairs with [`crate::EmacDefault`] so the user only spells out the
+/// const-generic configuration in one place. The `embassy_executor::task`
+/// signature for the `net_task` runner can then read
+/// `Runner<'static, EmacDefaultDriver<'static>>` instead of repeating
+/// `Runner<'static, EmacDriver<'static, 10, 10, 1600>>`.
+pub type EmacDefaultDriver<'d> = EmacDriver<'d, 10, 10, 1600>;
+
+/// Driver for the small `Emac<4, 4, 1600>` ring sizing.
+///
+/// See [`EmacDefaultDriver`] for the rationale.
+pub type EmacSmallDriver<'d> = EmacDriver<'d, 4, 4, 1600>;
 
 // =============================================================================
 // RX / TX tokens

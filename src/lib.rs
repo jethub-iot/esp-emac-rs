@@ -24,18 +24,27 @@
 //! # #[cfg(feature = "embassy-net")]
 //! # mod __doc {
 //! use esp_emac::config::{ClkGpio, EmacConfig, RmiiClockConfig, RmiiPins, XtalFreq};
-//! use esp_emac::emac::Emac;
+//! use esp_emac::EmacDefault;
 //! use esp_emac::embassy::EmacDriverState;
+//! use static_cell::StaticCell;
 //!
-//! static mut EMAC: Emac<10, 10, 1600> = Emac::new(EmacConfig {
+//! // `EmacDefault` is the `Emac<10, 10, 1600>` alias. `StaticCell`
+//! // gives us a `&'static mut EmacDefault` without `static mut` +
+//! // an `unsafe { addr_of_mut!(...) }` dance.
+//! static EMAC: StaticCell<EmacDefault> = StaticCell::new();
+//! static EMAC_STATE: EmacDriverState = EmacDriverState::new();
+//!
+//! // In `main` — `EMAC.init(...)` returns the `&'static mut EmacDefault`
+//! // you pass to the driver:
+//! # fn doc() {
+//! let _emac = EMAC.init(EmacDefault::new(EmacConfig {
 //!     clock: RmiiClockConfig::InternalApll {
 //!         gpio: ClkGpio::Gpio17,
 //!         xtal: XtalFreq::Mhz40,
 //!     },
 //!     pins: RmiiPins { mdc: 23, mdio: 18 },
-//! });
-//!
-//! static EMAC_STATE: EmacDriverState = EmacDriverState::new();
+//! }));
+//! # }
 //! # }
 //! ```
 //!

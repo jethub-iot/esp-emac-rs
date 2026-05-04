@@ -103,22 +103,20 @@ use embedded_hal::delay::DelayNs;
 use esp_hal::{delay::Delay, interrupt::Priority, rng::Rng};
 
 use esp_emac::config::{ClkGpio, EmacConfig, RmiiClockConfig, RmiiPins, XtalFreq};
-use esp_emac::emac::{Duplex as EmacDuplex, Emac, Speed as EmacSpeed};
-use esp_emac::embassy::{EmacDriver, EmacDriverState};
+use esp_emac::emac::{Duplex as EmacDuplex, Speed as EmacSpeed};
+use esp_emac::embassy::{EmacDefaultDriver, EmacDriver, EmacDriverState};
 use esp_emac::mdio::EspMdio;
+use esp_emac::EmacDefault;
 
 use eth_mdio_phy::{Duplex as PhyDuplex, PhyDriver, Speed as PhySpeed};
 use eth_phy_lan87xx::PhyLan87xx;
 
-// 1. Static state — DMA holds raw pointers, must outlive the driver.
-static mut EMAC: Emac<10, 10, 1600> = Emac::new(EmacConfig {
-    clock: RmiiClockConfig::InternalApll {
-        gpio: ClkGpio::Gpio17,
-        xtal: XtalFreq::Mhz40,
-    },
-    pins: RmiiPins { mdc: 23, mdio: 18 },
-});
+use static_cell::StaticCell;
 
+// 1. Static storage — DMA holds raw pointers into the `Emac` instance,
+//    so it must live in `static` and never move. `StaticCell` lets us
+//    avoid `static mut` + the accompanying `unsafe { addr_of_mut!(...) }`.
+static EMAC: StaticCell<EmacDefault> = StaticCell::new();
 static EMAC_STATE: EmacDriverState = EmacDriverState::new();
 
 // 2. Bind the EMAC interrupt to the driver's state.
@@ -128,7 +126,7 @@ fn emac_interrupt_handler() {
 }
 
 #[embassy_executor::task]
-async fn net_task(mut runner: Runner<'static, EmacDriver<'static, 10, 10, 1600>>) {
+async fn net_task(mut runner: Runner<'static, EmacDefaultDriver<'static>>) {
     runner.run().await
 }
 
@@ -145,8 +143,13 @@ async fn main(spawner: Spawner) {
     let rng = Rng::new();
 
     // 3. Bring up MAC + PHY.
-    // SAFETY: EMAC is touched only here at init time.
-    let emac = unsafe { &mut *core::ptr::addr_of_mut!(EMAC) };
+    let emac = EMAC.init(EmacDefault::new(EmacConfig {
+        clock: RmiiClockConfig::InternalApll {
+            gpio: ClkGpio::Gpio17,
+            xtal: XtalFreq::Mhz40,
+        },
+        pins: RmiiPins { mdc: 23, mdio: 18 },
+    }));
     emac.set_mac_address([0x00, 0x70, 0x07, 0x24, 0x3B, 0x87]);
     emac.init(&mut delay).expect("EMAC init");
     emac.bind_interrupt(emac_interrupt_handler);
