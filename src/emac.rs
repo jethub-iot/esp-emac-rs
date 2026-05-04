@@ -614,9 +614,12 @@ mod tests {
 
     #[test]
     fn memory_usage_matches_dma() {
+        // Source the comparison from the same constants as the alias
+        // itself — retuning `DEFAULT_*` continues to match without
+        // touching this test.
         assert_eq!(
             EmacDefault::memory_usage(),
-            DmaEngine::<10, 10, 1600>::memory_usage()
+            DmaEngine::<DEFAULT_RX, DEFAULT_TX, DEFAULT_BUF>::memory_usage()
         );
     }
 }

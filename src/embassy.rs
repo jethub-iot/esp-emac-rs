@@ -28,9 +28,11 @@
 //!   wakers fire against the wrong state and the stack stalls.
 //!
 //! [`EmacDriver`] then ties the pair together. The borrow checker
-//! enforces single ownership through `&'d mut Emac<...>`, so as long
-//! as the `Emac` lives in `static` storage you can hand its
-//! `&'static mut` to exactly one driver.
+//! enforces that **at most one** driver holds the `&'d mut Emac<...>`
+//! at any given moment. Sequential reuse is allowed — once the borrow
+//! ends (driver dropped, scope exited) the same `Emac` can be paired
+//! with a fresh driver again, which is what the unit tests in this
+//! module already exercise.
 //!
 //! [`handle_emac_interrupt`]: EmacDriverState::handle_emac_interrupt
 //!
@@ -363,14 +365,14 @@ impl EmacDriverState {
 /// The driver holds a raw pointer to a previously-initialized
 /// [`Emac`] together with a reference to a shared [`EmacDriverState`].
 ///
-/// # Single ownership
+/// # Concurrent ownership
 ///
-/// Construct **exactly one** `EmacDriver` per `Emac`. The borrow
-/// checker enforces that through the `&'d mut Emac<...>` argument to
-/// [`Self::new`] — as long as the `Emac` lives in `static` storage
-/// (typical pattern: a [`static_cell::StaticCell<EmacDefault>`]
-/// initialized once), the `&'static mut` returned by `StaticCell::init`
-/// is only handed to one driver and aliasing is impossible.
+/// At most **one** `EmacDriver` can hold the `&'d mut Emac<...>` at a
+/// time. The borrow checker enforces that through the `&'d mut`
+/// argument to [`Self::new`] — concurrent aliasing is impossible.
+/// Sequential reuse is fine: once a driver is dropped, the same
+/// `Emac` can be paired with a fresh driver again. The unit tests in
+/// this module exercise that pattern.
 ///
 /// The companion [`EmacDriverState`] is **not** a strict singleton —
 /// see the module-level *Lifetime alignment* section. The constraint
@@ -378,7 +380,7 @@ impl EmacDriverState {
 /// [`EmacDriverState::handle_emac_interrupt`] runs against must be
 /// the same one passed here as `state`.
 ///
-/// For the default `Emac<10, 10, 1600>` ring sizing the
+/// For the default ring sizing the
 /// [`EmacDefaultDriver<'d>`](EmacDefaultDriver) alias removes the need
 /// to repeat the const generics in `embassy_executor::task` signatures.
 ///
@@ -386,9 +388,9 @@ impl EmacDriverState {
 ///
 /// The pointer is dereferenced in `Driver` impl methods. The lifetime
 /// `'d` ensures the underlying `Emac` outlives the driver, but the raw
-/// pointer means **mutable aliasing** would be unsound. The single-
-/// ownership invariant above is what keeps that aliasing impossible
-/// in practice.
+/// pointer means **mutable aliasing** would be unsound. The
+/// at-most-one-concurrent-driver invariant above is what keeps that
+/// aliasing impossible in practice.
 pub struct EmacDriver<'d, const RX: usize, const TX: usize, const BUF: usize> {
     emac: *mut Emac<RX, TX, BUF>,
     state: &'d EmacDriverState,
@@ -468,12 +470,12 @@ impl<'d, const RX: usize, const TX: usize, const BUF: usize> EmacDriver<'d, RX, 
 
 /// Driver for the [`crate::EmacDefault`] ring sizing.
 ///
-/// Sourced from the same `DEFAULT_RX` / `DEFAULT_TX` / `DEFAULT_BUF`
-/// constants as `EmacDefault`, so the two aliases stay paired even if
-/// the canonical sizing is retuned. The `embassy_executor::task`
-/// signature for the `net_task` runner can then read
-/// `Runner<'static, EmacDefaultDriver<'static>>` instead of repeating
-/// `Runner<'static, EmacDriver<'static, 10, 10, 1600>>`.
+/// Sourced from the same [`DEFAULT_RX`] / [`DEFAULT_TX`] /
+/// [`DEFAULT_BUF`] constants as `EmacDefault`, so the two aliases
+/// stay paired even if the canonical sizing is retuned. The
+/// `embassy_executor::task` signature for the `net_task` runner can
+/// then read `Runner<'static, EmacDefaultDriver<'static>>` instead
+/// of repeating the const generics at every call site.
 pub type EmacDefaultDriver<'d> = EmacDriver<'d, DEFAULT_RX, DEFAULT_TX, DEFAULT_BUF>;
 
 /// Driver for the [`crate::EmacSmall`] ring sizing.
