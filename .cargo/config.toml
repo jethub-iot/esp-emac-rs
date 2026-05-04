@@ -1,0 +1,21 @@
+# Build configuration for the bare-metal `examples/*.rs`.
+#
+# The crate itself (lib + unit tests) builds on the host without this
+# file. The `[unstable] build-std` line is needed when targeting
+# `xtensa-esp32-none-elf` because it is a Tier 3 target — `core` and
+# `alloc` must be built from source.
+#
+# Build the example with:
+#
+#     cargo build --release --example embassy_net_lan8720a \
+#         --features esp-hal,mdio-phy,embassy-net \
+#         --target xtensa-esp32-none-elf
+#
+# `[build] target` is intentionally NOT set here — `cargo test` on the
+# host needs to keep using the host triple.
+
+[target.xtensa-esp32-none-elf]
+rustflags = ["-C", "link-arg=-nostartfiles"]
+
+[unstable]
+build-std = ["core", "alloc"]

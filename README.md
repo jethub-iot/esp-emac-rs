@@ -1,25 +1,263 @@
 # esp-emac
 
 [![License: GPL-2.0-or-later OR Apache-2.0](https://img.shields.io/badge/license-GPL--2.0--or--later%20OR%20Apache--2.0-blue.svg)](#license)
+[![Crates.io](https://img.shields.io/crates/v/esp-emac.svg)](https://crates.io/crates/esp-emac)
+[![Documentation](https://docs.rs/esp-emac/badge.svg)](https://docs.rs/esp-emac)
 
 Native ESP32 Ethernet MAC driver for `#![no_std]` Rust. Owns the DMA
 engine and brings the EMAC peripheral up directly via memory-mapped
-register helpers — no `ph-esp32-mac`, no `esp-idf-svc`, no
-`esp-eth`.
+register helpers — no `ph-esp32-mac`, no `esp-idf-svc`, no `esp-eth`.
 
-Targets the **built-in EMAC** on the original ESP32 (Xtensa, dual-core).
-Of the wider family, EMAC is also present on ESP32-P4 (RISC-V, with a
-newer Synopsys GMAC revision and a different GPIO Matrix layout) — but
-P4 is **not** supported here yet; adding it would require a chip-feature
-split through `regs::*`, see crate-level scope notes. The S2/S3/C2/C3/
-C5/C6/H2 line has no EMAC at all; for those use SPI Ethernet (e.g.
-W5500 / ENC28J60). The driver is intended to run only on the original
-ESP32 / Xtensa target — bare-metal MMIO writes are unconditional and
-assume that memory map. Pure register-arithmetic unit tests do build
-and run on the host (`cargo test --target $HOST_TARGET`), which is how
-`regs/*` is exercised in CI.
+Pairs with [`eth-phy-lan87xx`](https://crates.io/crates/eth-phy-lan87xx)
+(or any [`eth-mdio-phy::PhyDriver`](https://crates.io/crates/eth-mdio-phy)
+implementation) for the PHY side, and with `embassy-net` for the
+TCP/IP stack.
 
-## What's in the box
+---
+
+## Installation
+
+Add to `Cargo.toml`:
+
+```toml
+[dependencies]
+esp-emac = { version = "0.1", features = ["esp-hal", "mdio-phy", "embassy-net"] }
+eth-phy-lan87xx = "0.1"   # or any other eth-mdio-phy::PhyDriver impl
+eth-mdio-phy    = "0.1"
+
+# Required runtime stack
+esp-hal           = { version = "1.0", features = ["esp32", "unstable"] }
+embassy-executor  = "0.9"
+embassy-net       = { version = "0.7", features = ["dhcpv4", "medium-ethernet"] }
+embassy-time      = "0.5"
+static_cell       = "2"
+embedded-hal      = "1.0"
+esp-backtrace     = { version = "0.18", features = ["esp32", "panic-handler", "println"] }
+esp-println       = { version = "0.16", default-features = false, features = ["esp32", "uart"] }
+esp-rtos          = { version = "0.2", features = ["esp32", "embassy"] }
+```
+
+Target triple: `xtensa-esp32-none-elf` (install via `espup install`).
+**MSRV: 1.75.** The driver works only on the original ESP32 (Xtensa LX6).
+
+### Features
+
+| Feature | Default | Pulls in | When to enable |
+| --- | --- | --- | --- |
+| `esp-hal` | off | `esp_hal::interrupt` for ISR binding | Always, for hardware bring-up |
+| `mdio-phy` | off | `eth-mdio-phy` (and `EspMdio: MdioBus` impl) | When using a `PhyDriver`-based PHY (LAN87xx etc.) |
+| `embassy-net` | off | `embassy-net-driver`, `embassy-sync`, `critical-section` | When using `embassy-net` TCP/IP stack |
+| `async` | off | `embedded-hal-async` | When using `AsyncResetController` |
+| `defmt` | off | `defmt::Format` derives | When logging through `defmt` |
+
+The typical firmware build enables `esp-hal + mdio-phy + embassy-net`.
+
+### Compatibility
+
+| esp-emac | esp-hal | embassy-net | embassy-executor | Rust target |
+| --- | --- | --- | --- | --- |
+| 0.1.x | 1.0.x | 0.7.x | 0.9.x | `xtensa-esp32-none-elf` |
+
+Other ESP variants (S2/S3/C-series/H2) have **no** built-in EMAC — use
+SPI Ethernet (W5500, ENC28J60) instead. ESP32-P4 has a newer Synopsys
+GMAC revision and is not yet supported (planned).
+
+---
+
+## Quick start (embassy-net + LAN8720A)
+
+The complete working example is in
+[`examples/embassy_net_lan8720a.rs`](examples/embassy_net_lan8720a.rs).
+The skeleton looks like this:
+
+```rust no_run
+#![no_std]
+#![no_main]
+
+use embassy_executor::Spawner;
+use embassy_net::{DhcpConfig, Runner, Stack, StackResources};
+use embassy_time::{Duration, Timer};
+use embedded_hal::delay::DelayNs;
+use esp_hal::{delay::Delay, interrupt::Priority, rng::Rng};
+
+use esp_emac::config::{ClkGpio, EmacConfig, RmiiClockConfig, RmiiPins, XtalFreq};
+use esp_emac::emac::{Duplex as EmacDuplex, Emac, Speed as EmacSpeed};
+use esp_emac::embassy::{EmacDriver, EmacDriverState};
+use esp_emac::mdio::EspMdio;
+
+use eth_mdio_phy::{Duplex as PhyDuplex, PhyDriver, Speed as PhySpeed};
+use eth_phy_lan87xx::PhyLan87xx;
+
+// 1. Static state — DMA holds raw pointers, must outlive the driver.
+static mut EMAC: Emac<10, 10, 1600> = Emac::new(EmacConfig {
+    clock: RmiiClockConfig::InternalApll {
+        gpio: ClkGpio::Gpio17,
+        xtal: XtalFreq::Mhz40,
+    },
+    pins: RmiiPins { mdc: 23, mdio: 18 },
+});
+
+static EMAC_STATE: EmacDriverState = EmacDriverState::new();
+
+// 2. Bind the EMAC interrupt to the driver's state.
+#[esp_hal::handler(priority = Priority::Priority1)]
+fn emac_interrupt_handler() {
+    EMAC_STATE.handle_emac_interrupt();
+}
+
+#[embassy_executor::task]
+async fn net_task(mut runner: Runner<'static, EmacDriver<'static, 10, 10, 1600>>) {
+    runner.run().await
+}
+
+#[esp_hal::main]
+async fn main(spawner: Spawner) {
+    let peripherals = esp_hal::init(esp_hal::Config::default());
+    let mut delay = Delay::new();
+    let rng = Rng::new(peripherals.RNG);
+
+    // 3. Bring up MAC + PHY.
+    // SAFETY: EMAC is touched only here at init time.
+    let emac = unsafe { &mut *core::ptr::addr_of_mut!(EMAC) };
+    emac.set_mac_address([0x00, 0x70, 0x07, 0x24, 0x3B, 0x87]);
+    emac.init(&mut delay).expect("EMAC init");
+    emac.bind_interrupt(emac_interrupt_handler);
+
+    let mut mdio = EspMdio::new();
+    let mut phy = PhyLan87xx::new(/* PHY addr */ 1);
+    phy.init(&mut mdio).expect("PHY init");
+
+    // 4. Wait for link, programme speed/duplex.
+    loop {
+        match phy.poll_link(&mut mdio) {
+            Ok(Some(status)) => {
+                emac.set_speed(match status.speed {
+                    PhySpeed::Mbps10 => EmacSpeed::Mbps10,
+                    PhySpeed::Mbps100 => EmacSpeed::Mbps100,
+                });
+                emac.set_duplex(match status.duplex {
+                    PhyDuplex::Half => EmacDuplex::Half,
+                    PhyDuplex::Full => EmacDuplex::Full,
+                });
+                EMAC_STATE.set_link_up();
+                break;
+            }
+            Ok(None) => delay.delay_ms(200),
+            Err(_) => delay.delay_ms(200),
+        }
+    }
+
+    emac.start().expect("EMAC start");
+
+    // 5. Plumb into embassy-net.
+    let driver = EmacDriver::new(emac, &EMAC_STATE);
+    let net_seed = rng.random() as u64 | ((rng.random() as u64) << 32);
+
+    static RESOURCES: static_cell::StaticCell<StackResources<8>> =
+        static_cell::StaticCell::new();
+    let (stack, runner) = embassy_net::new(
+        driver,
+        embassy_net::Config::dhcpv4(DhcpConfig::default()),
+        RESOURCES.init(StackResources::<8>::new()),
+        net_seed,
+    );
+
+    spawner.spawn(net_task(runner)).unwrap();
+
+    // 6. Wait for DHCP, use the stack.
+    loop {
+        if let Some(cfg) = stack.config_v4() {
+            // got IP address: cfg.address
+            break;
+        }
+        Timer::after(Duration::from_millis(500)).await;
+    }
+}
+```
+
+Bare-metal sync usage (without `embassy-net`) is documented in the
+crate-level rustdoc — see [`Emac::transmit`](https://docs.rs/esp-emac/latest/esp_emac/emac/struct.Emac.html#method.transmit)
+and [`Emac::receive`](https://docs.rs/esp-emac/latest/esp_emac/emac/struct.Emac.html#method.receive).
+
+---
+
+## Interrupt binding
+
+`EmacDriver` is event-driven: each frame received or descriptor freed
+fires a MAC interrupt that wakes the embassy-net runner. Three pieces
+need to line up:
+
+1. **A `static EMAC_STATE: EmacDriverState`.** Holds the `WAKER` the
+   driver polls and the `link_up` flag. Created with
+   `EmacDriverState::new()` and never moved.
+2. **A handler attribute'd with `#[esp_hal::handler]`** that calls
+   `EMAC_STATE.handle_emac_interrupt()`. Use `Priority::Priority1` —
+   the driver does not gate on priority, but level 1 keeps it well below
+   timer/scheduler interrupts.
+3. **`emac.bind_interrupt(handler)`** after `init()` — this maps the
+   ESP32 EMAC IRQ to the handler symbol via `esp-hal`'s interrupt
+   table.
+
+Forgetting step 3 silently produces a working link but no incoming
+frames at the embassy-net layer (`is_link_up()` true, `config_v4()`
+permanently `None`).
+
+---
+
+## Troubleshooting
+
+### Link is up but DHCP never completes
+
+Symptoms: `stack.is_link_up()` returns `true`, but `stack.config_v4()`
+stays `None` for tens of seconds.
+
+Most likely:
+
+* **MAC address bit 0 set** (multicast bit). The frame filter rejects
+  multicast as a source — the DHCP server's reply is delivered but
+  silently dropped before user space. Double-check the bytes you pass
+  to `set_mac_address`.
+* **Interrupt handler not bound** (see [Interrupt binding](#interrupt-binding)).
+* **PHY ANAR not restored after cold boot.** Use `eth-phy-lan87xx`
+  (which writes `ANAR=0x01E1` explicitly) or follow that pattern in your
+  custom PHY driver.
+
+### `EmacError::InvalidConfig` on `init`
+
+You picked an impossible `RmiiClockConfig`:
+
+* `External { Gpio16 / Gpio17 }` — those pads only have an output
+  function 5 on ESP32. Only `Gpio0` works as RMII clock input.
+* `InternalApll { Gpio0 }` — `Gpio0` only has the input function on
+  this peripheral. Use `Gpio16` (0° phase) or `Gpio17` (180° phase).
+
+### Link goes up at 10 Mbps when the PHY supports 100 Mbps
+
+`ANAR` got partially programmed and auto-neg converged on a subset.
+Cold boot of LAN87xx is the textbook case — that's why `eth-phy-lan87xx`
+writes `ANAR=0x01E1` explicitly. If using a different PHY driver, mirror
+that pattern.
+
+### Unicast RX silently fails (broadcast/multicast still arrive)
+
+The MAC address-filter latch in `GMACADDR0` was programmed in the
+wrong order. **HIGH first, LOW second** — the latch fires on the LOW
+write. `Emac::set_mac_address` does this correctly; if you bypass it
+and write through `regs::mac::*` raw, observe the order and the
+`AE` (`ADDRESS_ENABLE`) bit at bit 31 of `GMACADDR0H`.
+
+### `XtalFreq::Mhz40` but the link still won't come up
+
+Verify your module's actual crystal — there is no runtime detection.
+Most ESP32 modules (WROOM, WROVER, MINI, JXD-CPU-E1ETH) ship with
+40 MHz, but some legacy boards have 26 MHz. Picking the wrong value
+silently produces an off-frequency RMII reference clock.
+
+---
+
+## Reference
+
+### What's in the box
 
 * `Emac<RX, TX, BUF>` — the driver. RX/TX descriptor ring sizes and
   per-buffer length are const generics so the entire packet memory
@@ -40,65 +278,7 @@ and run on the host (`cargo test --target $HOST_TARGET`), which is how
 * `clock` — APLL 50 MHz programming for the RMII reference clock,
   plus GPIO0/16/17 routing.
 
-## Quick start (bare metal + LAN8720A)
-
-```rust no_run
-use esp_hal::delay::Delay;
-use esp_emac::{
-    Emac, EmacConfig, RmiiClockConfig, RmiiPins, ClkGpio, XtalFreq,
-};
-use esp_emac::mdio::EspMdio;
-use eth_phy_lan87xx::PhyLan87xx;
-use eth_mdio_phy::PhyDriver;
-
-// 1. Static state — must outlive the driver because DMA holds raw
-//    pointers into it. const generics fix the buffer sizes.
-static mut EMAC: Emac<10, 10, 1600> = Emac::new(EmacConfig {
-    clock: RmiiClockConfig::InternalApll {
-        gpio: ClkGpio::Gpio17,
-        xtal: XtalFreq::Mhz40,
-    },
-    pins: RmiiPins { mdc: 23, mdio: 18 },
-});
-
-# fn example() -> Result<(), esp_emac::EmacError> {
-# let mut delay = Delay::new();
-// 2. Bring it up.
-let emac = unsafe { &mut *core::ptr::addr_of_mut!(EMAC) };
-emac.set_mac_address([0x00, 0x70, 0x07, 0x24, 0x3B, 0x87]);
-emac.init(&mut delay)?;
-
-// 3. Talk to the PHY through SMI.
-let mut mdio = EspMdio::new();
-let mut phy = PhyLan87xx::new(/* PHY addr */ 1);
-phy.init(&mut mdio).expect("PHY init");
-
-// 4. Wait for link, programme speed/duplex, start.
-if let Ok(Some(status)) = phy.poll_link(&mut mdio) {
-    emac.set_speed(status.speed.into());
-    emac.set_duplex(status.duplex.into());
-}
-emac.start()?;
-
-// 5. From here either use embassy-net (feature `embassy-net`) or
-//    the synchronous `emac.transmit(&buf)` / `emac.receive(&mut buf)`
-//    API directly.
-# Ok(())
-# }
-```
-
-For the embassy-net path see [`embassy::EmacDriver`](src/embassy.rs)
-and the live firmware integration in
-[`testsystem-firmware-esp / src-hal/firmware/src/net/ethernet.rs`](https://github.com/jethome-iot/testsystem-firmware-esp/blob/main/src-hal/firmware/src/net/ethernet.rs).
-
-> **`Emac::default()` is intentionally not provided.** The clock and
-> pin configuration is hardware-specific and any default the crate
-> could pick (internal APLL on GPIO17, MDC/MDIO 23/18) would silently
-> mis-drive boards that expect a different layout — including any
-> design with PHY-driven external clock or MDC/MDIO routed elsewhere.
-> Always construct an explicit `EmacConfig`.
-
-## RMII clock modes
+### RMII clock modes
 
 ESP32 supports two mutually exclusive RMII reference-clock modes. The
 choice is dictated by the board layout — `Emac::init` rejects mismatched
@@ -112,23 +292,9 @@ GPIO selections with `EmacError::InvalidConfig`.
 
 `xtal` is an [`XtalFreq`](src/config.rs) enum (`Mhz26`, `Mhz32`, `Mhz40`)
 selecting APLL SDM coefficients. **It must match the actual on-board
-crystal** — there is no detection at runtime, picking the wrong value
-silently produces a wrong-frequency RMII reference clock and the link
-won't come up. Most modules (`ESP32-WROOM`, `ESP32-WROVER`,
-`ESP32-MINI`, JXD-CPU-E1ETH) use 40 MHz; the older 26 MHz and rare
-32 MHz cases are also supported.
+crystal** — there is no detection at runtime.
 
-`InternalApll { Gpio0 }` and `External { Gpio16/17 }` are
-hardware-impossible on ESP32 (function 5 direction is fixed per pad)
-and rejected at init time.
-
-> **TODO (deferred):** the `gpio` field of `RmiiClockConfig::External`
-> is effectively a unit since GPIO0 is the only valid input pad; once
-> the rest of the API is revisited it should become a unit variant.
-> For `InternalApll`, `Gpio16` vs `Gpio17` is a real choice (phase),
-> so it stays parameterised.
-
-## Hardware bring-up sequence
+### Hardware bring-up sequence
 
 `Emac::init` follows the canonical ESP32 GMAC sequence — every step is
 documented inline at [`src/emac.rs`](src/emac.rs):
@@ -153,64 +319,51 @@ documented inline at [`src/emac.rs`](src/emac.rs):
    (TSF + RSF — store-and-forward).
 9. Hand the DMA the descriptor list base addresses.
 10. Programme the primary MAC address into `GMACADDR0H/L` —
-    **HIGH first, then LOW**. The Synopsys GMAC core latches the
-    filter address on the LOW write; doing it the other way around
-    leaves the internal latch holding the stale reset value (unicast
-    RX silently dies, register read-back lies).
+    **HIGH first, then LOW**.
 
 `Emac::start` then enables MAC TX, DMA TX, DMA RX, MAC RX in that order
 and issues a poll-demand to wake the RX DMA out of `Suspended`.
 
-## Choosing static buffer sizes
+### Choosing static buffer sizes
 
 `Emac<RX, TX, BUF>` is const-generic on the RX/TX ring counts and the
 per-buffer length. Each descriptor is 32 bytes (ATDS layout); each
 buffer is `BUF` bytes (typical 1536 or 1600).
 
-| Profile       | RX | TX | BUF  | RAM     |
-|---------------|----|----|------|---------|
+| Profile | RX | TX | BUF | RAM |
+| --- | --- | --- | --- | --- |
 | `EmacDefault` | 10 | 10 | 1600 | ~32 KiB |
-| `EmacSmall`   |  4 |  4 | 1600 | ~13 KiB |
+| `EmacSmall` | 4 | 4 | 1600 | ~13 KiB |
 
 `Emac::memory_usage()` returns the exact byte count for any chosen
 combination. Pick the size at compile time; the value lives in `.bss`.
 
-## Cargo features
+> **`Emac::default()` is intentionally not provided.** The clock and
+> pin configuration is hardware-specific and any default the crate
+> could pick (internal APLL on GPIO17, MDC/MDIO 23/18) would silently
+> mis-drive boards that expect a different layout. Always construct an
+> explicit `EmacConfig`.
 
-| Feature       | Default | Pulls in                                        |
-|---------------|---------|-------------------------------------------------|
-| `esp-hal`     | off     | `esp_hal::interrupt::*` for ISR binding         |
-| `mdio-phy`    | off     | `eth-mdio-phy` (and an `EspMdio: MdioBus` impl) |
-| `embassy-net` | off     | `embassy-net-driver` + `embassy-sync`           |
-| `defmt`       | off     | `defmt::Format` derives on public types         |
-
-The firmware build typically enables `esp-hal` + `mdio-phy` +
-`embassy-net` together.
-
-## Known gotchas
-
-These are baked into the driver but worth knowing if you're reading
-the source or porting elsewhere:
+### Known gotchas (baked into the driver)
 
 * **`GMACADDR0` write order.** HIGH first (with the `AE` bit at
   bit 31), LOW second. The internal address-filter latch fires on the
   LOW write only. — `regs::mac::set_mac_address`.
 * **`DMARXPOLLDEMAND` after every successful `receive()`.** Without
   it the RX DMA enters `Suspended` once the ring drains and never
-  recovers, even though the descriptor that just freed up is now
-  CPU-owned. — `Emac::receive`.
+  recovers. — `Emac::receive`.
 * **RX descriptor `ATDS=1`.** The MAC writes RX status into descriptor
-  word 4, which only exists in the enhanced 8-word layout
-  (`DMABUSMODE.ATDS=1`). Stick to the `dma::descriptor` types in
-  this crate — the legacy 4-word layout silently mis-decodes
-  every received frame.
+  word 4, which only exists in the enhanced 8-word layout. The legacy
+  4-word layout silently mis-decodes every received frame.
 * **APLL 50 MHz must be programmed BEFORE the DMA software reset.**
   The reset sequencer needs a working RMII reference clock to
   deassert the busy bit.
 * **PHY reset register.** A `BMCR.RESET` cycle does NOT restore
   `ANAR` to `0x01E1` on the LAN8720A on cold boot. After resetting
-  the PHY, write `0x01E1` to `ANAR` explicitly before kicking
-  auto-negotiation. Already handled in `eth-phy-lan87xx`.
+  the PHY, write `0x01E1` to `ANAR` explicitly. Already handled in
+  `eth-phy-lan87xx`.
+
+---
 
 ## Hardware verified on
 
@@ -221,6 +374,9 @@ the source or porting elsewhere:
 Cold boot, soft reset (DTR-toggle / `RTC_CNTL.SW_SYS_RST`), and USB
 power-cycle all yield the same behaviour: PHY init → link up
 100 Mbps full → DHCP → ICMP/HTTP.
+
+A reference firmware integration is in
+[`testsystem-firmware-esp / src-hal/firmware/src/net/ethernet.rs`](https://github.com/jethome-iot/testsystem-firmware-esp/blob/main/src-hal/firmware/src/net/ethernet.rs).
 
 ## License
 
