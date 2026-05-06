@@ -39,7 +39,39 @@
 //! with a fresh driver again, which is what the unit tests in this
 //! module already exercise.
 //!
+//! # Recovery from task respawn
+//!
+//! `Emac::init` is a one-shot: if the task that owns the
+//! `&'static mut EmacDefault` panics and is respawned by the executor,
+//! the static EMAC retains state from the previous run. Calling
+//! `init` a second time returns [`EmacError::AlreadyInitialized`] and
+//! does nothing. The reborrowed `&'static mut` is still valid — the
+//! peripheral is still configured — but the DMA engine may have
+//! stopped mid-operation (descriptors marked owned by the engine,
+//! TX FIFO partially drained), and the driver state in
+//! [`EmacDriverState`] no longer matches the in-flight wakers from
+//! the previous run.
+//!
+//! Recovery sequence in the respawned task:
+//!
+//! ```ignore
+//! // Reborrow — same EMAC, still post-init from prior run.
+//! let emac = unsafe { &mut *core::ptr::addr_of_mut!(EMAC) };
+//! // Tear down the running engine and clear DMA state. `stop()` is
+//! // idempotent; calling it on a not-Running EMAC also returns Ok(()).
+//! let _ = emac.stop();
+//! // Restart fresh. The peripheral keeps its already-programmed pins,
+//! // clocks, and MAC address — only the DMA rings need to come back up.
+//! emac.start()?;
+//! ```
+//!
+//! Do **not** call `init()` a second time hoping it will reset the
+//! peripheral — it won't, and the error swallows silently in code
+//! that ignores the `Result`. Use the explicit `stop()` + `start()`
+//! cycle above.
+//!
 //! [`handle_emac_interrupt`]: EmacDriverState::handle_emac_interrupt
+//! [`EmacError::AlreadyInitialized`]: crate::EmacError::AlreadyInitialized
 //!
 //! # Usage
 //!
