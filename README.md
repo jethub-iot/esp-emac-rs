@@ -36,7 +36,8 @@ esp-rtos          = { version = "0.2", features = ["esp32", "embassy"] }
 ```
 
 Target triple: `xtensa-esp32-none-elf` (install via `espup install`).
-**MSRV: 1.75.** The driver works only on the original ESP32 (Xtensa LX6).
+**MSRV: 1.88** (constrained by `esp-hal = "1.0"`). The driver works only
+on the original ESP32 (Xtensa LX6).
 
 ### Features
 

@@ -71,7 +71,7 @@
 //! # Compatibility
 //!
 //! - **Target:** `xtensa-esp32-none-elf` (original ESP32, Xtensa LX6)
-//! - **MSRV:** 1.75
+//! - **MSRV:** 1.88 (constrained by `esp-hal = "1.0"`'s declared `rust-version`)
 //! - **`esp-hal`:** 1.0.x
 //! - **`embassy-net`:** 0.7.x
 //! - **`embassy-executor`:** 0.9.x
