@@ -99,9 +99,9 @@ pub mod regs;
 pub mod reset;
 
 pub use config::{ClkGpio, EmacConfig, RmiiClockConfig, RmiiPins, XtalFreq};
-pub use emac::{Emac, EmacDefault, EmacSmall, EmacState};
 #[cfg(feature = "mdio-phy")]
 pub use emac::{Duplex, Speed};
+pub use emac::{Emac, EmacDefault, EmacSmall, EmacState};
 pub use error::EmacError;
 pub use interrupt::InterruptStatus;
 pub use mdio::{EspMdio, MdcClockDivider};
