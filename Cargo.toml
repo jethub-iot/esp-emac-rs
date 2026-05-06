@@ -1,6 +1,6 @@
 [package]
 name          = "esp-emac"
-version       = "0.1.2"
+version       = "0.2.0"
 edition       = "2021"
 rust-version  = "1.88"
 authors       = ["Viacheslav Bocharov <v@baodeep.com>", "JetHome (r)"]
@@ -39,7 +39,7 @@ esp-hal            = { version = "1.1.0", features = ["esp32", "unstable"], opti
 # crate publishes — kept in lockstep with the actual eth-mdio-phy
 # version this driver is tested against, so registry consumers don't
 # accidentally pick up an older patch via `^0.1.0` caret resolution.
-eth-mdio-phy       = { version = "0.1.1", path = "../eth-phy/crates/eth-mdio-phy", optional = true }
+eth-mdio-phy       = { version = "0.2.0", path = "../eth-phy/crates/eth-mdio-phy", optional = true }
 embassy-net-driver = { version = "0.2", optional = true }
 embassy-sync       = { version = "0.8", optional = true }
 critical-section   = { version = "1.2", optional = true }
@@ -69,7 +69,7 @@ esp-backtrace    = { version = "0.19.0", features = ["esp32", "panic-handler", "
 esp-println      = { version = "0.17.0", default-features = false, features = ["esp32", "uart"] }
 esp-rtos         = { version = "0.3.0", features = ["esp32", "embassy"] }
 esp-sync         = { version = "0.2.1", features = ["esp32"] }
-eth-phy-lan87xx  = { version = "0.1", path = "../eth-phy/crates/eth-phy-lan87xx" }
+eth-phy-lan87xx  = { version = "0.2", path = "../eth-phy/crates/eth-phy-lan87xx" }
 static_cell      = "2"
 
 [[example]]
