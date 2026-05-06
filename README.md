@@ -3,7 +3,6 @@
 [![License: GPL-2.0-or-later OR Apache-2.0](https://img.shields.io/badge/license-GPL--2.0--or--later%20OR%20Apache--2.0-blue.svg)](#license)
 [![Crates.io](https://img.shields.io/crates/v/esp-emac.svg)](https://crates.io/crates/esp-emac)
 [![Documentation](https://docs.rs/esp-emac/badge.svg)](https://docs.rs/esp-emac)
-[![Status: WIP](https://img.shields.io/badge/status-WIP-orange.svg)](#pre-publication)
 
 Native ESP32 Ethernet MAC driver for `#![no_std]` Rust. Owns the DMA
 engine and brings the EMAC peripheral up directly via memory-mapped
@@ -38,27 +37,6 @@ esp-rtos          = { version = "0.2", features = ["esp32", "embassy"] }
 
 Target triple: `xtensa-esp32-none-elf` (install via `espup install`).
 **MSRV: 1.75.** The driver works only on the original ESP32 (Xtensa LX6).
-
-### Pre-publication
-
-> The crates **are not yet on crates.io** (this is the WIP badge). Until
-> they ship, vendor them through git submodules and reference via
-> local `path` instead of `version`:
->
-> ```sh
-> git submodule add https://github.com/jethub-iot/esp-emac-rs.git vendor/esp-emac
-> git submodule add https://github.com/jethub-iot/eth-phy-rs.git   vendor/eth-phy
-> git submodule update --init --recursive
-> ```
->
-> ```toml
-> [dependencies]
-> esp-emac        = { path = "vendor/esp-emac",                       features = ["esp-hal", "mdio-phy", "embassy-net"] }
-> eth-mdio-phy    = { path = "vendor/eth-phy/crates/eth-mdio-phy" }
-> eth-phy-lan87xx = { path = "vendor/eth-phy/crates/eth-phy-lan87xx" }
-> ```
->
-> Once published the snippet collapses to plain `version = "0.1"` deps.
 
 ### Features
 
