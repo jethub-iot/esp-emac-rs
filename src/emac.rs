@@ -205,7 +205,10 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             RmiiClockConfig::External { gpio } if !matches!(gpio, ClkGpio::Gpio0) => {
                 return Err(EmacError::InvalidConfig);
             }
-            RmiiClockConfig::InternalApll { gpio, .. } if matches!(gpio, ClkGpio::Gpio0) => {
+            RmiiClockConfig::InternalApll {
+                gpio: ClkGpio::Gpio0,
+                ..
+            } => {
                 return Err(EmacError::InvalidConfig);
             }
             _ => {}
@@ -468,7 +471,7 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             esp_hal::interrupt::disable(core, Interrupt::ETH_MAC);
         }
         esp_hal::interrupt::bind_handler(Interrupt::ETH_MAC, handler);
-        let _ = esp_hal::interrupt::enable(Interrupt::ETH_MAC, handler.priority());
+        esp_hal::interrupt::enable(Interrupt::ETH_MAC, handler.priority());
     }
 
     /// Disable the EMAC interrupt at the chip level.
