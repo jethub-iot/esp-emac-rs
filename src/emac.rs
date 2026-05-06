@@ -28,45 +28,20 @@ const TX_FIFO_FLUSH_TIMEOUT_US: u32 = 100_000;
 // Link parameters and driver state
 // =============================================================================
 
-/// Link speed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum Speed {
-    /// 10 Mbps.
-    Mbps10,
-    /// 100 Mbps.
-    Mbps100,
-}
-
-/// Duplex mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum Duplex {
-    /// Half duplex.
-    Half,
-    /// Full duplex.
-    Full,
-}
-
+// Re-export the link-parameter enums from the trait crate so a PHY
+// driver's `LinkStatus` lands directly into `set_speed` / `set_duplex`
+// without the call-site `.into()` boilerplate that was needed when
+// these were duplicate local types. Keeping the types in one place
+// (eth_mdio_phy) also means a future minor-release variant addition
+// (`Speed::Mbps1000`) propagates through both ends of the stack with
+// a single bump.
+//
+// Gated by the `mdio-phy` feature because that feature is what pulls
+// `eth_mdio_phy` in as a dependency. Users without the feature can
+// still drop down to `crate::regs::mac::set_speed_100mbps` /
+// `set_duplex_full` directly — see the module-level docs.
 #[cfg(feature = "mdio-phy")]
-impl From<eth_mdio_phy::Speed> for Speed {
-    fn from(s: eth_mdio_phy::Speed) -> Self {
-        match s {
-            eth_mdio_phy::Speed::Mbps10 => Speed::Mbps10,
-            eth_mdio_phy::Speed::Mbps100 => Speed::Mbps100,
-        }
-    }
-}
-
-#[cfg(feature = "mdio-phy")]
-impl From<eth_mdio_phy::Duplex> for Duplex {
-    fn from(d: eth_mdio_phy::Duplex) -> Self {
-        match d {
-            eth_mdio_phy::Duplex::Half => Duplex::Half,
-            eth_mdio_phy::Duplex::Full => Duplex::Full,
-        }
-    }
-}
+pub use eth_mdio_phy::{Duplex, Speed};
 
 /// EMAC driver state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +118,11 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
     }
 
     /// Apply the link speed reported by the PHY.
+    ///
+    /// Available only with the `mdio-phy` feature, which is also what
+    /// pulls in the [`Speed`] type from `eth_mdio_phy`. Without the
+    /// feature, drop down to [`crate::regs::mac::set_speed_100mbps`].
+    #[cfg(feature = "mdio-phy")]
     pub fn set_speed(&mut self, speed: Speed) {
         if self.state == EmacState::Uninitialized {
             return;
@@ -151,6 +131,11 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
     }
 
     /// Apply the duplex mode reported by the PHY.
+    ///
+    /// Available only with the `mdio-phy` feature, which is also what
+    /// pulls in the [`Duplex`] type from `eth_mdio_phy`. Without the
+    /// feature, drop down to [`crate::regs::mac::set_duplex_full`].
+    #[cfg(feature = "mdio-phy")]
     pub fn set_duplex(&mut self, duplex: Duplex) {
         if self.state == EmacState::Uninitialized {
             return;

@@ -32,12 +32,11 @@ use embedded_hal::delay::DelayNs;
 use esp_hal::{delay::Delay, interrupt::Priority, rng::Rng};
 
 use esp_emac::config::{ClkGpio, EmacConfig, RmiiClockConfig, RmiiPins, XtalFreq};
-use esp_emac::emac::{Duplex as EmacDuplex, Speed as EmacSpeed};
 use esp_emac::embassy::{EmacDefaultDriver, EmacDriverState};
 use esp_emac::mdio::EspMdio;
 use esp_emac::EmacDefault;
 
-use eth_mdio_phy::{Duplex as PhyDuplex, PhyDriver, Speed as PhySpeed};
+use eth_mdio_phy::PhyDriver;
 use eth_phy_lan87xx::PhyLan87xx;
 
 use static_cell::StaticCell;
@@ -120,14 +119,11 @@ async fn main(spawner: Spawner) {
         delay.delay_ms(200);
     };
 
-    emac.set_speed(match status.speed {
-        PhySpeed::Mbps10 => EmacSpeed::Mbps10,
-        PhySpeed::Mbps100 => EmacSpeed::Mbps100,
-    });
-    emac.set_duplex(match status.duplex {
-        PhyDuplex::Half => EmacDuplex::Half,
-        PhyDuplex::Full => EmacDuplex::Full,
-    });
+    // `Speed` / `Duplex` are re-exports of the trait-crate types
+    // under the `mdio-phy` feature, so the PHY's `LinkStatus` lands
+    // directly into `set_speed` / `set_duplex` with no conversion.
+    emac.set_speed(status.speed);
+    emac.set_duplex(status.duplex);
     EMAC_STATE.set_link_up();
 
     emac.start().expect("EMAC start");
