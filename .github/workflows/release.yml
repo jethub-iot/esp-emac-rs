@@ -1,14 +1,23 @@
 name: Release
 
-# Publishes the crate to crates.io when a GitHub Release is published with a
-# tag of the form `v<semver>` (e.g. v0.2.0). Refuses to publish if the tag
-# disagrees with `Cargo.toml`, and skips re-publishing a version that is
-# already on crates.io (idempotent reruns).
+# Publishes esp-emac to crates.io when a GitHub Release is published with a
+# tag of the form `v<semver>`. Refuses to publish if Cargo.toml and the tag
+# disagree, and refuses to re-publish a version already on crates.io
+# (idempotent reruns).
 #
 # Pre-flight: the trait crate `eth-mdio-phy` (in the sibling eth-phy-rs
 # repository) MUST already be on crates.io at a compatible version, because
 # `cargo publish` emits a registry-only `version = "..."` dep once the local
 # `path = "..."` is stripped, and verification will pull that registry copy.
+#
+# Pipeline:
+#   1. verify         — re-run the full CI matrix as a gate. No green → no publish.
+#   2. verify-version — confirm tag matches Cargo.toml.
+#   3. publish        — sparse-index skip-check, dry-run, then cargo publish.
+#
+# The draft Release itself is kept up-to-date by release-drafter.yml: every
+# merged PR refreshes the draft. A maintainer reviews, edits, and publishes
+# it manually — publishing creates the git tag, which fires this workflow.
 
 on:
   release:
@@ -19,22 +28,72 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
 
 jobs:
-  publish:
-    name: cargo publish
+  verify:
+    name: Verify (re-run CI before publishing)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout the tagged commit
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.release.tag_name }}
-
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
-
+          path: esp-emac
+      - uses: actions/checkout@v6
+        with:
+          repository: jethub-iot/eth-phy-rs
+          path: eth-phy
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: riscv32imc-unknown-none-elf
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: esp-emac
+      - working-directory: esp-emac
+        run: cargo fmt --all -- --check
+      - working-directory: esp-emac
+        run: cargo clippy --lib --features 'mdio-phy embassy-net async defmt' -- -D warnings
+      - working-directory: esp-emac
+        run: cargo test --features 'mdio-phy embassy-net async defmt'
+      - working-directory: esp-emac
+        env:
+          RUSTDOCFLAGS: --cfg docsrs
+        run: cargo doc --no-deps --target riscv32imc-unknown-none-elf --features 'mdio-phy embassy-net async defmt'
 
+  verify-xtensa:
+    name: Verify (xtensa example builds)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          path: esp-emac
+      - uses: actions/checkout@v6
+        with:
+          repository: jethub-iot/eth-phy-rs
+          path: eth-phy
+      - uses: esp-rs/xtensa-toolchain@v1.7
+        with:
+          default: true
+          buildtargets: esp32
+          ldproxy: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: esp-emac
+      - working-directory: esp-emac
+        run: cargo build --release --example embassy_net_lan8720a --target xtensa-esp32-none-elf --features 'esp-hal mdio-phy embassy-net'
+
+  verify-version:
+    name: Verify tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    needs: [verify, verify-xtensa]
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
       - name: Resolve version from tag
         id: tag
         run: |
@@ -45,8 +104,7 @@ jobs:
             exit 1
           fi
           echo "version=${BASH_REMATCH[1]}" >>"$GITHUB_OUTPUT"
-
-      - name: Verify Cargo.toml version matches tag
+      - name: Confirm Cargo.toml agrees
         run: |
           set -euo pipefail
           ACTUAL=$(cargo metadata --no-deps --format-version 1 \
@@ -56,14 +114,22 @@ jobs:
             exit 1
           fi
 
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: [verify, verify-xtensa, verify-version]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
       - name: Skip if already on crates.io
         id: check
         run: |
           set -euo pipefail
-          VERSION='${{ steps.tag.outputs.version }}'
-          # Hit the sparse index directly (cargo search only reports the latest
-          # version, so a yank could mask an existing version that needs to be
-          # left alone).
+          VERSION='${{ needs.verify-version.outputs.version }}'
           if curl -fsSL "https://index.crates.io/es/p-/esp-emac" 2>/dev/null \
                | jq -e --arg v "$VERSION" 'select(.vers == $v)' >/dev/null; then
             echo "esp-emac@$VERSION already published — skipping"
@@ -76,10 +142,10 @@ jobs:
         if: steps.check.outputs.skip == 'false'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.JETHUB_CRATES_TOKEN }}
-        # `cargo publish` defaults to `--verify`, which compiles the packaged
-        # crate against the **default** feature set. esp-emac's default is
-        # empty (no `esp-hal`, no `eth-mdio-phy`), so the host-target build
-        # has no path-dep on the sibling eth-phy-rs repo.
+        # `cargo publish` defaults to `--verify`, which compiles the
+        # packaged crate against the **default** feature set. esp-emac's
+        # default is empty (no `esp-hal`, no `eth-mdio-phy`), so the
+        # host-target build has no path-dep on the sibling eth-phy-rs repo.
         run: cargo publish --dry-run
 
       - name: Publish to crates.io

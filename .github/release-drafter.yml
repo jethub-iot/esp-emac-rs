@@ -1,0 +1,75 @@
+# Release Drafter configuration.
+# See https://github.com/release-drafter/release-drafter#configuration
+
+# Tag and release name templates.
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+# Starting version when there is no previous published release.
+# Subsequent bumps are computed relative to the most recent published tag.
+initial-version: '0.2.0'
+
+# Default bump is a minor. Labelling a PR with 'major' or 'patch'
+# overrides this.
+version-resolver:
+  major:
+    labels:
+      - 'major'
+      - 'breaking'
+  minor:
+    labels:
+      - 'minor'
+      - 'enhancement'
+      - 'feature'
+  patch:
+    labels:
+      - 'patch'
+      - 'fix'
+      - 'bug'
+      - 'dependencies'
+      - 'chore'
+      - 'docs'
+  default: minor
+
+# Categorize PRs into sections in the release body.
+categories:
+  - title: '🚀 Features'
+    labels:
+      - 'feature'
+      - 'enhancement'
+      - 'minor'
+  - title: '🐛 Bug fixes'
+    labels:
+      - 'fix'
+      - 'bug'
+      - 'patch'
+  - title: '💥 Breaking changes'
+    labels:
+      - 'breaking'
+      - 'major'
+  - title: '📚 Documentation'
+    labels:
+      - 'docs'
+      - 'documentation'
+  - title: '🔧 Maintenance'
+    labels:
+      - 'chore'
+      - 'ci'
+      - 'refactor'
+  - title: '📦 Dependencies'
+    labels:
+      - 'dependencies'
+
+# One-line entry template for each PR.
+change-template: '- $TITLE (#$NUMBER) @$AUTHOR'
+
+# Escape markdown characters in the title.
+change-title-escapes: '\<*_&'
+
+# Full draft body template.
+template: |
+  ## What's Changed
+
+  $CHANGES
+
+  **Full Changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION
