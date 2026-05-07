@@ -24,12 +24,26 @@ name: Release
 on:
   release:
     types: [published]
+  # Manual trigger for re-running the pipeline against an already-
+  # published release (e.g. after a workflow-only fix lands in `main`
+  # post-publish). The Release-event's `release.tag_name` is replaced
+  # by `inputs.tag` when this trigger fires.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to re-publish (e.g. v0.2.0)'
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  # Tag we operate on. `release.tag_name` exists when the workflow is
+  # fired by a Release publish; for `workflow_dispatch` re-runs we fall
+  # back to the user-supplied input.
+  TAG_NAME: ${{ github.event.release.tag_name || inputs.tag }}
   # See ci.yml — workflow-scope `RUSTFLAGS` would override `.cargo/config.toml`
   # rustflags and break the xtensa link. `-D warnings` is enforced through
   # clippy's `-- -D warnings` and per-job `RUSTDOCFLAGS`.
@@ -41,7 +55,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.TAG_NAME }}
           path: esp-emac
       - uses: actions/checkout@v6
         with:
@@ -71,7 +85,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.TAG_NAME }}
           path: esp-emac
       - uses: actions/checkout@v6
         with:
@@ -94,7 +108,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.TAG_NAME }}
           path: esp-emac
       - uses: actions/checkout@v6
         with:
@@ -118,12 +132,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.TAG_NAME }}
       - name: Resolve version from tag
         id: tag
         run: |
           set -euo pipefail
-          TAG='${{ github.event.release.tag_name }}'
+          TAG='${{ env.TAG_NAME }}'
           # cargo / crates.io grammar: MAJOR.MINOR.PATCH with optional
           # `-prerelease`. SemVer `+build` metadata is intentionally NOT
           # accepted — cargo strips it on publish, so a `+build` tag
@@ -149,11 +163,25 @@ jobs:
     runs-on: ubuntu-latest
     needs: [verify, verify-xtensa, verify-msrv, verify-version]
     steps:
+      # Side-checkout the sibling jethub-iot/eth-phy-rs alongside this
+      # crate. Even though `eth-mdio-phy` is `optional = true` and not
+      # in the default feature set, cargo parses the *entire* manifest
+      # (including optional path-deps) before it can strip paths and
+      # publish. A missing `../eth-phy/...` directory makes
+      # `cargo publish` fail with "No such file or directory" at the
+      # manifest-load stage.
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.TAG_NAME }}
+          path: esp-emac
+      - uses: actions/checkout@v6
+        with:
+          repository: jethub-iot/eth-phy-rs
+          path: eth-phy
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: esp-emac
 
       - name: Skip if already on crates.io
         id: check
@@ -175,14 +203,16 @@ jobs:
       #
       # The default `--verify` step compiles the packaged crate against
       # the **default** feature set. esp-emac's default is empty
-      # (no `esp-hal`, no `eth-mdio-phy`), so the host-target build has
-      # no path-dep on the sibling eth-phy-rs repo.
+      # (no `esp-hal`, no `eth-mdio-phy`), but the manifest-load itself
+      # still needs the sibling eth-phy-rs checkout above.
       - name: Dry-run publish
         if: steps.check.outputs.skip == 'false'
+        working-directory: esp-emac
         run: cargo publish --dry-run
 
       - name: Publish to crates.io
         if: steps.check.outputs.skip == 'false'
+        working-directory: esp-emac
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.JETHUB_CRATES_TOKEN }}
         run: cargo publish
