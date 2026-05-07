@@ -153,8 +153,9 @@ async fn main(spawner: Spawner) {
 
     // embassy-executor 0.10: `#[task]` functions return
     // `Result<SpawnToken<_>, SpawnError>`, and `Spawner::spawn` returns
-    // `()`. So the `.unwrap()` belongs on the task call, not the spawn.
-    spawner.spawn(net_task(runner).unwrap());
+    // `()`. So the fallible call is the task, not the spawn — match the
+    // `expect("…")` style used by the rest of this example.
+    spawner.spawn(net_task(runner).expect("net_task spawn"));
 
     // Hot loop: wait for DHCP, then idle. In a real app you'd hand the
     // stack to your TCP/UDP services here.
