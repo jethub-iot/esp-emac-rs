@@ -26,9 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a recoverable warning, not a state-machine corruption signal.
   Callers that pattern-match on `Ok(())` need a wildcard or
   explicit handling of the new variant.
-- MSRV bumped from 1.75 to 1.88, matching what `esp-hal = "1.0"`
-  declares in its own manifest. The previous declaration was
-  mis-advertised.
+- MSRV bumped from 1.75 to 1.88, matching what `esp-hal = "1.1"`
+  declares in its own manifest (`esp-hal 1.0` carried the same
+  1.88 pin). The previous declaration was mis-advertised.
 - Bump `eth-mdio-phy` dependency pin from `^0.1.1` to `^0.2.0`.
   Trait crate's `Speed`/`Duplex` became `#[non_exhaustive]` in
   that release.
@@ -40,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `EmacError::TxFlushTimeout` variant (lands as a non-breaking
   variant addition because `EmacError` is `#[non_exhaustive]`).
+- `Emac::set_speed` / `set_duplex` now match each `Speed`/`Duplex`
+  variant explicitly. The trait-crate types became `#[non_exhaustive]`
+  in `eth-mdio-phy 0.2`, so a future variant (e.g. a hypothetical
+  `Speed::Mbps1000`) compiles transparently but has no register
+  encoding on ESP32 EMAC. Such inputs are clamped to 100 Mbps
+  (highest mode the peripheral physically supports) / Full duplex,
+  with a `defmt::warn!` under the `defmt` feature flagging the
+  mismatch.
 
 ### Fixed
 

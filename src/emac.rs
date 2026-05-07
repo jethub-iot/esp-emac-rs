@@ -119,6 +119,14 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
 
     /// Apply the link speed reported by the PHY.
     ///
+    /// The ESP32 EMAC peripheral physically supports only 10 Mbps and
+    /// 100 Mbps. `Speed` is `#[non_exhaustive]` in the trait crate, so
+    /// future variants (e.g. a hypothetical `Mbps1000`) compile but
+    /// have no register encoding here. They are clamped to 100 Mbps —
+    /// the highest mode the EMAC actually supports — and a warning is
+    /// emitted under the `defmt` feature so the discrepancy is
+    /// visible at runtime.
+    ///
     /// Available only with the `mdio-phy` feature, which is also what
     /// pulls in the [`Speed`] type from `eth_mdio_phy`. Without the
     /// feature, drop down to [`crate::regs::mac::set_speed_100mbps`].
@@ -127,10 +135,27 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         if self.state == EmacState::Uninitialized {
             return;
         }
-        mac_regs::set_speed_100mbps(matches!(speed, Speed::Mbps100));
+        let is_100 = match speed {
+            Speed::Mbps10 => false,
+            Speed::Mbps100 => true,
+            _ => {
+                #[cfg(feature = "defmt")]
+                defmt::warn!(
+                    "esp-emac: unsupported Speed variant, clamping to 100 Mbps \
+                     (ESP32 EMAC is 10/100 only)"
+                );
+                true
+            }
+        };
+        mac_regs::set_speed_100mbps(is_100);
     }
 
     /// Apply the duplex mode reported by the PHY.
+    ///
+    /// `Duplex` is `#[non_exhaustive]` in the trait crate. ESP32 EMAC
+    /// has only the two MII-canonical modes (Half/Full); any future
+    /// variant is clamped to Full (the more permissive default) with
+    /// a `defmt::warn!` so the unexpected input doesn't pass silently.
     ///
     /// Available only with the `mdio-phy` feature, which is also what
     /// pulls in the [`Duplex`] type from `eth_mdio_phy`. Without the
@@ -140,7 +165,19 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         if self.state == EmacState::Uninitialized {
             return;
         }
-        mac_regs::set_duplex_full(matches!(duplex, Duplex::Full));
+        let is_full = match duplex {
+            Duplex::Half => false,
+            Duplex::Full => true,
+            _ => {
+                #[cfg(feature = "defmt")]
+                defmt::warn!(
+                    "esp-emac: unsupported Duplex variant, clamping to Full \
+                     (ESP32 EMAC supports Half/Full only)"
+                );
+                true
+            }
+        };
+        mac_regs::set_duplex_full(is_full);
     }
 
     // ── Initialization ─────────────────────────────────────────────────────
