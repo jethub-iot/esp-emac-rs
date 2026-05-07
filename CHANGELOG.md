@@ -5,6 +5,80 @@ All notable changes to `esp-emac` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-05-06
+
+### Breaking
+
+- `Speed` and `Duplex` are now re-exports of `eth_mdio_phy::{Speed,
+  Duplex}` (gated by feature `mdio-phy`) rather than locally
+  defined enums with `From<eth_mdio_phy::*>` conversions. Call
+  sites that used to write `emac.set_speed(status.speed.into())`
+  drop the `.into()` — the types are literally the same now.
+  Without the `mdio-phy` feature the symbols are no longer exposed
+  from the crate; drop down to
+  `crate::regs::mac::set_speed_100mbps` /
+  `set_duplex_full` for raw register control.
+- `Emac::stop()` now returns `Err(EmacError::TxFlushTimeout)` when
+  the FTF poll exhausts `TX_FIFO_FLUSH_TIMEOUT_US` instead of
+  silently returning `Ok(())`. The rest of the teardown still runs
+  unconditionally, so the driver state still ends up at
+  `Initialized` and `start()` is safe to retry — the new error is
+  a recoverable warning, not a state-machine corruption signal.
+  Callers that pattern-match on `Ok(())` need a wildcard or
+  explicit handling of the new variant.
+- MSRV bumped from 1.75 to 1.88, matching what `esp-hal = "1.1"`
+  declares in its own manifest (`esp-hal 1.0` carried the same
+  1.88 pin). The previous declaration was mis-advertised.
+- Bump `eth-mdio-phy` dependency pin from `^0.1.1` to `^0.2.0`.
+  Trait crate's `Speed`/`Duplex` became `#[non_exhaustive]` in
+  that release.
+- Bump `embassy-sync` from `^0.7` to `^0.8` (cascade from
+  `esp-hal 1.1` requirement).
+- Bump `esp-hal` from `^1.0.0` to `^1.1.0`.
+
+### Added
+
+- `EmacError::TxFlushTimeout` variant (lands as a non-breaking
+  variant addition because `EmacError` is `#[non_exhaustive]`).
+- `Emac::set_speed` / `set_duplex` now match each `Speed`/`Duplex`
+  variant explicitly. The trait-crate types became `#[non_exhaustive]`
+  in `eth-mdio-phy 0.2`, so a future variant (e.g. a hypothetical
+  `Speed::Mbps1000`) compiles transparently but has no register
+  encoding on ESP32 EMAC. Such inputs are clamped to 100 Mbps
+  (highest mode the peripheral physically supports) / Full duplex,
+  with a `defmt::warn!` under the `defmt` feature flagging the
+  mismatch.
+
+### Fixed
+
+- Two clippy errors under `cargo +esp clippy --target
+  xtensa-esp32-none-elf -D warnings`:
+  `redundant_guards` at `emac.rs:208` (collapsed
+  `RmiiClockConfig::InternalApll { gpio, .. } if matches!(gpio, ClkGpio::Gpio0)`
+  into `RmiiClockConfig::InternalApll { gpio: ClkGpio::Gpio0, .. }`)
+  and `let_unit_value` at `emac.rs:474`
+  (`esp_hal::interrupt::enable` returns `()`, the prior
+  `let _ =` was dead).
+
+### Documentation
+
+- New "Recovery from task respawn" section in the embassy-net
+  module rustdoc covering the `static mut EMAC` re-borrow path:
+  `init()` is one-shot, so a respawned task must call `stop()` +
+  `start()` to bring the engine back up rather than silently
+  ignoring `EmacError::AlreadyInitialized`.
+- `[package.metadata.docs.rs]` now sets `default-target =
+  "riscv32imc-unknown-none-elf"` and drops the `esp-hal` feature.
+  docs.rs cannot satisfy `xtensa-esp32-none-elf` (rustc upstream
+  has no xtensa target, and docs.rs does not carry the Microchip
+  fork), so the previous metadata produced a "Documentation:
+  failed" badge. Matches the convention every other esp-rs crate
+  (esp-hal, esp-println, esp-backtrace, esp-storage, esp-radio)
+  already uses.
+- Drop the WIP shields.io badge from README and remove the
+  `### Pre-publication` section now that the crate ships on
+  crates.io as 0.2.0.
+
 ## [0.1.2] - 2026-05-04
 
 ### Added
@@ -83,6 +157,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `reset::async_impl::AsyncResetController` (feature `async`).
 - `clock` module — APLL 50 MHz programming and GPIO0/16/17 routing.
 
+[0.2.0]: https://github.com/jethub-iot/esp-emac-rs/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/jethub-iot/esp-emac-rs/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/jethub-iot/esp-emac-rs/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jethub-iot/esp-emac-rs/releases/tag/v0.1.0

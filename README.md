@@ -3,7 +3,6 @@
 [![License: GPL-2.0-or-later OR Apache-2.0](https://img.shields.io/badge/license-GPL--2.0--or--later%20OR%20Apache--2.0-blue.svg)](#license)
 [![Crates.io](https://img.shields.io/crates/v/esp-emac.svg)](https://crates.io/crates/esp-emac)
 [![Documentation](https://docs.rs/esp-emac/badge.svg)](https://docs.rs/esp-emac)
-[![Status: WIP](https://img.shields.io/badge/status-WIP-orange.svg)](#pre-publication)
 
 Native ESP32 Ethernet MAC driver for `#![no_std]` Rust. Owns the DMA
 engine and brings the EMAC peripheral up directly via memory-mapped
@@ -20,45 +19,26 @@ TCP/IP stack.
 
 ```toml
 [dependencies]
-esp-emac        = { version = "0.1", features = ["esp-hal", "mdio-phy", "embassy-net"] }
-eth-mdio-phy    = "0.1"
-eth-phy-lan87xx = "0.1"   # or any other eth_mdio_phy::PhyDriver impl
+esp-emac        = { version = "0.2", features = ["esp-hal", "mdio-phy", "embassy-net"] }
+eth-mdio-phy    = "0.2"
+eth-phy-lan87xx = "0.2"   # or any other eth_mdio_phy::PhyDriver impl
 
 # Required runtime stack
-esp-hal           = { version = "1.0", features = ["esp32", "unstable"] }
-embassy-executor  = "0.9"
-embassy-net       = { version = "0.7", features = ["dhcpv4", "medium-ethernet"] }
+esp-hal           = { version = "1.1", features = ["esp32", "unstable"] }
+embassy-executor  = "0.10"
+embassy-net       = { version = "0.9", features = ["dhcpv4", "medium-ethernet"] }
 embassy-time      = "0.5"
 static_cell       = "2"
 embedded-hal      = "1.0"
-esp-backtrace     = { version = "0.18", features = ["esp32", "panic-handler", "println"] }
-esp-println       = { version = "0.16", default-features = false, features = ["esp32", "uart"] }
-esp-rtos          = { version = "0.2", features = ["esp32", "embassy"] }
+esp-backtrace     = { version = "0.19", features = ["esp32", "panic-handler", "println"] }
+esp-println       = { version = "0.17", default-features = false, features = ["esp32", "uart"] }
+esp-rtos          = { version = "0.3", features = ["esp32", "embassy"] }
 ```
 
 Target triple: `xtensa-esp32-none-elf` (install via `espup install`).
-**MSRV: 1.75.** The driver works only on the original ESP32 (Xtensa LX6).
-
-### Pre-publication
-
-> The crates **are not yet on crates.io** (this is the WIP badge). Until
-> they ship, vendor them through git submodules and reference via
-> local `path` instead of `version`:
->
-> ```sh
-> git submodule add https://github.com/jethub-iot/esp-emac-rs.git vendor/esp-emac
-> git submodule add https://github.com/jethub-iot/eth-phy-rs.git   vendor/eth-phy
-> git submodule update --init --recursive
-> ```
->
-> ```toml
-> [dependencies]
-> esp-emac        = { path = "vendor/esp-emac",                       features = ["esp-hal", "mdio-phy", "embassy-net"] }
-> eth-mdio-phy    = { path = "vendor/eth-phy/crates/eth-mdio-phy" }
-> eth-phy-lan87xx = { path = "vendor/eth-phy/crates/eth-phy-lan87xx" }
-> ```
->
-> Once published the snippet collapses to plain `version = "0.1"` deps.
+**MSRV: 1.88** (constrained by `esp-hal = "1.1"`'s declared
+`rust-version`). The driver works only on the original ESP32
+(Xtensa LX6).
 
 ### Features
 
@@ -76,7 +56,7 @@ The typical firmware build enables `esp-hal + mdio-phy + embassy-net`.
 
 | esp-emac | esp-hal | embassy-net | embassy-executor | Rust target |
 | --- | --- | --- | --- | --- |
-| 0.1.x | 1.0.x | 0.7.x | 0.9.x | `xtensa-esp32-none-elf` |
+| 0.2.x | 1.1.x | 0.9.x | 0.10.x | `xtensa-esp32-none-elf` |
 
 Other ESP variants (S2/S3/C-series/H2) have **no** built-in EMAC — use
 SPI Ethernet (W5500, ENC28J60) instead. ESP32-P4 has a newer Synopsys

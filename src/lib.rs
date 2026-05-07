@@ -71,10 +71,10 @@
 //! # Compatibility
 //!
 //! - **Target:** `xtensa-esp32-none-elf` (original ESP32, Xtensa LX6)
-//! - **MSRV:** 1.75
-//! - **`esp-hal`:** 1.0.x
-//! - **`embassy-net`:** 0.7.x
-//! - **`embassy-executor`:** 0.9.x
+//! - **MSRV:** 1.88 (constrained by `esp-hal = "1.1"`'s declared `rust-version`)
+//! - **`esp-hal`:** 1.1.x
+//! - **`embassy-net`:** 0.9.x
+//! - **`embassy-executor`:** 0.10.x
 //!
 //! Other ESP variants (S2/S3/C-series/H2) have **no** built-in EMAC.
 //! ESP32-P4 has a newer Synopsys GMAC revision and is not yet supported
@@ -99,7 +99,9 @@ pub mod regs;
 pub mod reset;
 
 pub use config::{ClkGpio, EmacConfig, RmiiClockConfig, RmiiPins, XtalFreq};
-pub use emac::{Duplex, Emac, EmacDefault, EmacSmall, EmacState, Speed};
+#[cfg(feature = "mdio-phy")]
+pub use emac::{Duplex, Speed};
+pub use emac::{Emac, EmacDefault, EmacSmall, EmacState};
 pub use error::EmacError;
 pub use interrupt::InterruptStatus;
 pub use mdio::{EspMdio, MdcClockDivider};

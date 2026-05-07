@@ -28,45 +28,20 @@ const TX_FIFO_FLUSH_TIMEOUT_US: u32 = 100_000;
 // Link parameters and driver state
 // =============================================================================
 
-/// Link speed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum Speed {
-    /// 10 Mbps.
-    Mbps10,
-    /// 100 Mbps.
-    Mbps100,
-}
-
-/// Duplex mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum Duplex {
-    /// Half duplex.
-    Half,
-    /// Full duplex.
-    Full,
-}
-
+// Re-export the link-parameter enums from the trait crate so a PHY
+// driver's `LinkStatus` lands directly into `set_speed` / `set_duplex`
+// without the call-site `.into()` boilerplate that was needed when
+// these were duplicate local types. Keeping the types in one place
+// (eth_mdio_phy) also means a future minor-release variant addition
+// (`Speed::Mbps1000`) propagates through both ends of the stack with
+// a single bump.
+//
+// Gated by the `mdio-phy` feature because that feature is what pulls
+// `eth_mdio_phy` in as a dependency. Users without the feature can
+// still drop down to `crate::regs::mac::set_speed_100mbps` /
+// `set_duplex_full` directly — see the module-level docs.
 #[cfg(feature = "mdio-phy")]
-impl From<eth_mdio_phy::Speed> for Speed {
-    fn from(s: eth_mdio_phy::Speed) -> Self {
-        match s {
-            eth_mdio_phy::Speed::Mbps10 => Speed::Mbps10,
-            eth_mdio_phy::Speed::Mbps100 => Speed::Mbps100,
-        }
-    }
-}
-
-#[cfg(feature = "mdio-phy")]
-impl From<eth_mdio_phy::Duplex> for Duplex {
-    fn from(d: eth_mdio_phy::Duplex) -> Self {
-        match d {
-            eth_mdio_phy::Duplex::Half => Duplex::Half,
-            eth_mdio_phy::Duplex::Full => Duplex::Full,
-        }
-    }
-}
+pub use eth_mdio_phy::{Duplex, Speed};
 
 /// EMAC driver state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,19 +118,66 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
     }
 
     /// Apply the link speed reported by the PHY.
+    ///
+    /// The ESP32 EMAC peripheral physically supports only 10 Mbps and
+    /// 100 Mbps. `Speed` is `#[non_exhaustive]` in the trait crate, so
+    /// future variants (e.g. a hypothetical `Mbps1000`) compile but
+    /// have no register encoding here. They are clamped to 100 Mbps —
+    /// the highest mode the EMAC actually supports — and a warning is
+    /// emitted under the `defmt` feature so the discrepancy is
+    /// visible at runtime.
+    ///
+    /// Available only with the `mdio-phy` feature, which is also what
+    /// pulls in the [`Speed`] type from `eth_mdio_phy`. Without the
+    /// feature, drop down to [`crate::regs::mac::set_speed_100mbps`].
+    #[cfg(feature = "mdio-phy")]
     pub fn set_speed(&mut self, speed: Speed) {
         if self.state == EmacState::Uninitialized {
             return;
         }
-        mac_regs::set_speed_100mbps(matches!(speed, Speed::Mbps100));
+        let is_100 = match speed {
+            Speed::Mbps10 => false,
+            Speed::Mbps100 => true,
+            _ => {
+                #[cfg(feature = "defmt")]
+                defmt::warn!(
+                    "esp-emac: unsupported Speed variant, clamping to 100 Mbps \
+                     (ESP32 EMAC is 10/100 only)"
+                );
+                true
+            }
+        };
+        mac_regs::set_speed_100mbps(is_100);
     }
 
     /// Apply the duplex mode reported by the PHY.
+    ///
+    /// `Duplex` is `#[non_exhaustive]` in the trait crate. ESP32 EMAC
+    /// has only the two MII-canonical modes (Half/Full); any future
+    /// variant is clamped to Full (the more permissive default) with
+    /// a `defmt::warn!` so the unexpected input doesn't pass silently.
+    ///
+    /// Available only with the `mdio-phy` feature, which is also what
+    /// pulls in the [`Duplex`] type from `eth_mdio_phy`. Without the
+    /// feature, drop down to [`crate::regs::mac::set_duplex_full`].
+    #[cfg(feature = "mdio-phy")]
     pub fn set_duplex(&mut self, duplex: Duplex) {
         if self.state == EmacState::Uninitialized {
             return;
         }
-        mac_regs::set_duplex_full(matches!(duplex, Duplex::Full));
+        let is_full = match duplex {
+            Duplex::Half => false,
+            Duplex::Full => true,
+            _ => {
+                #[cfg(feature = "defmt")]
+                defmt::warn!(
+                    "esp-emac: unsupported Duplex variant, clamping to Full \
+                     (ESP32 EMAC supports Half/Full only)"
+                );
+                true
+            }
+        };
+        mac_regs::set_duplex_full(is_full);
     }
 
     // ── Initialization ─────────────────────────────────────────────────────
@@ -205,7 +227,10 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             RmiiClockConfig::External { gpio } if !matches!(gpio, ClkGpio::Gpio0) => {
                 return Err(EmacError::InvalidConfig);
             }
-            RmiiClockConfig::InternalApll { gpio, .. } if matches!(gpio, ClkGpio::Gpio0) => {
+            RmiiClockConfig::InternalApll {
+                gpio: ClkGpio::Gpio0,
+                ..
+            } => {
                 return Err(EmacError::InvalidConfig);
             }
             _ => {}
@@ -351,13 +376,26 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
     ///
     /// Polls the TX-FIFO flush bit (`FTF`) for up to
     /// `TX_FIFO_FLUSH_TIMEOUT_US` microseconds, sleeping `delay` between
-    /// polls so the DMA actually has time to drain. If the timeout
-    /// expires the function still tears the rest of the path down —
-    /// driver state ends up in `Initialized` either way.
+    /// polls so the DMA actually has time to drain. The rest of the
+    /// teardown (MAC RX/TX disable, DMA RX stop, interrupt-status
+    /// clear, state transition to `Initialized`) runs unconditionally
+    /// — even on flush timeout the driver winds up in `Initialized`
+    /// and is safe to re-`start()`.
     ///
-    /// Idempotent on an already-stopped driver: calling `stop` while in
-    /// `Initialized` returns `Ok(())` without touching hardware. Only
-    /// `Uninitialized` is rejected with `EmacError::NotInitialized`.
+    /// Returns:
+    /// - `Ok(())` on a clean teardown (FTF self-cleared in time).
+    /// - `Err(EmacError::TxFlushTimeout)` when the FTF poll exhausted
+    ///   `TX_FIFO_FLUSH_TIMEOUT_US`. Teardown still completed — at
+    ///   least one in-flight TX frame may have been truncated on the
+    ///   wire. `state` is `Initialized` either way, so a follow-up
+    ///   `start()` is the recoverable path. There is no in-crate
+    ///   "full re-init" — [`Emac::init`] is one-shot — so a terminal
+    ///   recovery means a peripheral or SoC reset from the
+    ///   application layer.
+    /// - `Err(EmacError::NotInitialized)` if called from `Uninitialized`.
+    ///
+    /// Idempotent on an already-stopped driver: calling `stop` while
+    /// in `Initialized` returns `Ok(())` without touching hardware.
     pub fn stop(&mut self, delay: &mut impl DelayNs) -> Result<(), EmacError> {
         match self.state {
             EmacState::Running => {} // proceed with the tear-down below
@@ -372,8 +410,10 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         dma_regs::flush_tx_fifo();
         const POLL_STEP_US: u32 = 10;
         let mut waited_us = 0u32;
+        let mut flush_timed_out = true;
         while waited_us < TX_FIFO_FLUSH_TIMEOUT_US {
             if (dma_regs::operation_mode() & operation::FTF) == 0 {
+                flush_timed_out = false;
                 break;
             }
             delay.delay_us(POLL_STEP_US);
@@ -393,7 +433,12 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         dma_regs::clear_all_interrupts();
 
         self.state = EmacState::Initialized;
-        Ok(())
+
+        if flush_timed_out {
+            Err(EmacError::TxFlushTimeout)
+        } else {
+            Ok(())
+        }
     }
 
     // ── Frame I/O ─────────────────────────────────────────────────────────
@@ -468,7 +513,7 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             esp_hal::interrupt::disable(core, Interrupt::ETH_MAC);
         }
         esp_hal::interrupt::bind_handler(Interrupt::ETH_MAC, handler);
-        let _ = esp_hal::interrupt::enable(Interrupt::ETH_MAC, handler.priority());
+        esp_hal::interrupt::enable(Interrupt::ETH_MAC, handler.priority());
     }
 
     /// Disable the EMAC interrupt at the chip level.
