@@ -1,0 +1,37 @@
+name: Release Drafter
+
+# Keeps a "Next release" draft GitHub Release up to date as PRs are merged
+# into main. Triggers only on push to main (i.e. after a PR is merged), not
+# on PR open/update.
+#
+# Each run:
+#   * Computes the next version (next minor bump from the most recent
+#     published Release; first run uses `initial-version` from the config).
+#   * Re-generates the draft body from the PR titles/bodies merged since
+#     that published release.
+#   * Overwrites the single open draft (no accumulation of stale drafts).
+#
+# A maintainer opens Releases in the GitHub UI, reviews the auto-generated
+# notes, adjusts the version if needed, and hits "Publish". Publishing
+# creates the git tag, which triggers release.yml → crates.io.
+#
+# Configuration lives in .github/release-drafter.yml.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  update_draft:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write         # to write the draft Release
+      pull-requests: read
+    steps:
+      - uses: release-drafter/release-drafter@v7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
