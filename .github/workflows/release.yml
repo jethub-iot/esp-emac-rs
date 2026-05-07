@@ -1,0 +1,89 @@
+name: Release
+
+# Publishes the crate to crates.io when a GitHub Release is published with a
+# tag of the form `v<semver>` (e.g. v0.2.0). Refuses to publish if the tag
+# disagrees with `Cargo.toml`, and skips re-publishing a version that is
+# already on crates.io (idempotent reruns).
+#
+# Pre-flight: the trait crate `eth-mdio-phy` (in the sibling eth-phy-rs
+# repository) MUST already be on crates.io at a compatible version, because
+# `cargo publish` emits a registry-only `version = "..."` dep once the local
+# `path = "..."` is stripped, and verification will pull that registry copy.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: cargo publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the tagged commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Resolve version from tag
+        id: tag
+        run: |
+          set -euo pipefail
+          TAG='${{ github.event.release.tag_name }}'
+          if [[ ! "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?)$ ]]; then
+            echo "::error::Tag '$TAG' does not match 'v<semver>'"
+            exit 1
+          fi
+          echo "version=${BASH_REMATCH[1]}" >>"$GITHUB_OUTPUT"
+
+      - name: Verify Cargo.toml version matches tag
+        run: |
+          set -euo pipefail
+          ACTUAL=$(cargo metadata --no-deps --format-version 1 \
+                   | jq -r '.packages[] | select(.name == "esp-emac") | .version')
+          if [ "$ACTUAL" != '${{ steps.tag.outputs.version }}' ]; then
+            echo "::error::Cargo.toml says $ACTUAL, tag says ${{ steps.tag.outputs.version }}"
+            exit 1
+          fi
+
+      - name: Skip if already on crates.io
+        id: check
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.tag.outputs.version }}'
+          # Hit the sparse index directly (cargo search only reports the latest
+          # version, so a yank could mask an existing version that needs to be
+          # left alone).
+          if curl -fsSL "https://index.crates.io/es/p-/esp-emac" 2>/dev/null \
+               | jq -e --arg v "$VERSION" 'select(.vers == $v)' >/dev/null; then
+            echo "esp-emac@$VERSION already published — skipping"
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Dry-run publish
+        if: steps.check.outputs.skip == 'false'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.JETHUB_CRATES_TOKEN }}
+        # `cargo publish` defaults to `--verify`, which compiles the packaged
+        # crate against the **default** feature set. esp-emac's default is
+        # empty (no `esp-hal`, no `eth-mdio-phy`), so the host-target build
+        # has no path-dep on the sibling eth-phy-rs repo.
+        run: cargo publish --dry-run
+
+      - name: Publish to crates.io
+        if: steps.check.outputs.skip == 'false'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.JETHUB_CRATES_TOKEN }}
+        run: cargo publish

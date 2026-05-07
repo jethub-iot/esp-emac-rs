@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (host, mdio-phy + embassy-net + async + defmt)
+    runs-on: ubuntu-latest
+    steps:
+      # Side-checkout sibling eth-phy-rs to satisfy `path = "../eth-phy/..."`
+      # dev/runtime deps. The path is what `Cargo.toml` declares; published
+      # consumers get the registry version.
+      - uses: actions/checkout@v6
+        with:
+          path: esp-emac
+      - uses: actions/checkout@v6
+        with:
+          repository: jethub-iot/eth-phy-rs
+          path: eth-phy
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: esp-emac
+      - working-directory: esp-emac
+        # `--all-features` would pull in `esp-hal` which only builds for
+        # xtensa-esp32-none-elf; clippy on host can only cover the
+        # target_arch-independent surface. Cover that surface explicitly.
+        # `--tests` is intentionally omitted: the `regs/*` test modules carry
+        # `assert!(BASE < ...)` compile-time layout checks that newer clippy
+        # flags as `assertions_on_constants` — those run as proper tests in
+        # the `test` job below.
+        run: cargo clippy --lib --features 'mdio-phy embassy-net async defmt' -- -D warnings
+
+  test:
+    name: test (host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: esp-emac
+      - uses: actions/checkout@v6
+        with:
+          repository: jethub-iot/eth-phy-rs
+          path: eth-phy
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: esp-emac
+      - working-directory: esp-emac
+        run: cargo test --features 'mdio-phy embassy-net async defmt'
+
+  doc:
+    name: rustdoc (riscv32imc target, matches docs.rs)
+    runs-on: ubuntu-latest
+    env:
+      # No `-D warnings` here: pre-existing intra-doc-link warnings
+      # (`write` ambiguity, a few unresolved links) are tracked separately
+      # and would otherwise block this job. docs.rs itself does not enforce
+      # `-D warnings`, so this matches what hits the published docs.
+      RUSTDOCFLAGS: --cfg docsrs
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: esp-emac
+      - uses: actions/checkout@v6
+        with:
+          repository: jethub-iot/eth-phy-rs
+          path: eth-phy
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv32imc-unknown-none-elf
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: esp-emac
+      - working-directory: esp-emac
+        run: cargo doc --no-deps --target riscv32imc-unknown-none-elf --features 'mdio-phy embassy-net async defmt'
+
+  example-xtensa:
+    name: build example (xtensa-esp32-none-elf)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: esp-emac
+      - uses: actions/checkout@v6
+        with:
+          repository: jethub-iot/eth-phy-rs
+          path: eth-phy
+      - uses: esp-rs/xtensa-toolchain@v1.7
+        with:
+          default: true
+          buildtargets: esp32
+          ldproxy: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: esp-emac
+      - working-directory: esp-emac
+        run: cargo build --example embassy_net_lan8720a --release --features 'esp-hal mdio-phy embassy-net'
