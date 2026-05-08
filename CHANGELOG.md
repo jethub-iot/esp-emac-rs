@@ -5,6 +5,27 @@ All notable changes to `esp-emac` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-05-08
+
+### Added
+
+- Hardware checksum offload for the EMAC: TX descriptors now request
+  full TCP/UDP/ICMP + IPv4-header checksum insertion (`TDES0.CIC = 0b11`),
+  and `GMACCONFIG.IPC` is set so the DMA verifies received checksums and
+  silently drops bad frames before they reach the host. The embassy-net
+  driver advertises `Checksum::None` for `ipv4`, `tcp`, `udp`, and
+  `icmpv4` so smoltcp skips redundant software computation.
+
+  Behavior is correct on either side: a peer talking to us sees normal
+  Ethernet frames with valid checksums, and frames we receive with bad
+  checksums never appear at the application. Two new unit tests cover
+  the descriptor flag and the advertised capabilities.
+
+  Verified on jxd-pm380-e1eth + LAN8720A. No measurable throughput
+  delta on the iperf2 loopback (smoltcp packet pipeline is the
+  dominant cost), but eliminates a real per-packet CPU expense and
+  enables future zero-copy work.
+
 ## [0.2.0] - 2026-05-06
 
 ### Breaking
