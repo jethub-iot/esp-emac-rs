@@ -175,11 +175,18 @@ impl EmacInstrumentation {
     /// the running totals; the hardware register is zero after this
     /// call.
     ///
-    /// Safe to call from any non-ISR context — Embassy task, blocking
-    /// `main()`, host unit tests. Mixed-precision tearing between
-    /// fields is possible (see the type-level docs), but the worst
-    /// outcome is a snapshot whose `rx_calls` and `rx_some` disagree
-    /// by one or two — fine for ratio metrics.
+    /// # Precondition
+    ///
+    /// Performs a volatile MMIO read of `DMAMISSEDFR` via
+    /// [`crate::regs::dma::missed_frames`]. The EMAC peripheral clock
+    /// must be enabled before this is called — typically after
+    /// `Emac::init`. Calling before the clock is on will bus-fault.
+    ///
+    /// Safe to call from any non-ISR context (Embassy task, blocking
+    /// `main()`) once the precondition above is met. Mixed-precision
+    /// tearing between fields is possible (see the type-level docs),
+    /// but the worst outcome is a snapshot whose `rx_calls` and
+    /// `rx_some` disagree by one or two — fine for ratio metrics.
     #[must_use]
     pub fn snapshot(state: &EmacDriverState) -> Self {
         // Roll the clear-on-read DMA counters into the sticky
@@ -222,6 +229,12 @@ impl EmacInstrumentation {
     /// Zero every instrumentation counter on `state` and clear the
     /// DMA missed-frame / FIFO-overflow hardware register so the next
     /// [`EmacInstrumentation::snapshot`] starts from a clean baseline.
+    ///
+    /// # Precondition
+    ///
+    /// Like [`Self::snapshot`], performs a volatile MMIO read to drain
+    /// the clear-on-read `DMAMISSEDFR` register. The EMAC peripheral
+    /// clock must be enabled before this is called.
     ///
     /// Per-field stores are `Relaxed`; this is not synchronization but
     /// a "best-effort" reset between measurement windows. The ISR may
