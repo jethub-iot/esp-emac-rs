@@ -85,7 +85,7 @@ use esp_hal::{delay::Delay, interrupt::Priority, rng::Rng};
 
 use esp_emac::config::{ClkGpio, EmacConfig, RmiiClockConfig, RmiiPins, XtalFreq};
 use esp_emac::emac::{Duplex as EmacDuplex, Speed as EmacSpeed};
-use esp_emac::embassy::{EmacDefaultDriver, EmacDriverState};
+use esp_emac::embassy_net::{EmacDefaultDriver, EmacDriverState};
 use esp_emac::mdio::EspMdio;
 use esp_emac::EmacDefault;
 
