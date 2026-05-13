@@ -92,7 +92,9 @@ pub(crate) fn now_us() -> u32 {
     let dur = esp_hal::time::Instant::now()
         .duration_since_epoch()
         .as_micros();
-    // `as_micros` already returns `u64`; the as-cast is the explicit
+    // `esp_hal::time::Duration::as_micros` returns `u64` (note: this is
+    // esp-hal's own Duration type, NOT `core::time::Duration` whose
+    // `as_micros()` returns `u128`). The cast below is the explicit
     // truncation to the wrap-aware `u32` deltas the histograms use.
     dur as u32
 }
