@@ -259,13 +259,16 @@ pub fn set_frame_filter(val: u32) {
 /// Not intended for production stack use; embassy-net's normal mode
 /// relies on the unicast filter to keep the descriptor ring quiet.
 ///
-/// # Safety
+/// # Precondition
 ///
-/// Touches a memory-mapped register at the GMAC base. Requires that the
-/// EMAC peripheral clock is enabled (same precondition every helper in
-/// this module shares); since the function is `pub` and not `unsafe`,
-/// callers reach it only after a successful [`crate::Emac::init`] —
-/// which is exactly the point at which the clock is guaranteed to be on.
+/// Touches a memory-mapped register at the GMAC base. The EMAC peripheral
+/// clock must be enabled before this is called — `Emac::init` brings the
+/// clock up, so the typical call sequence is `Emac::init(...)` followed
+/// by `regs::mac::set_promiscuous(true)` once the driver is ready. The
+/// helper is `pub` and `safe` so calling it before the clock is on will
+/// not be caught by the type system; the resulting access will fault
+/// (bus error) at runtime. The precondition is shared with every other
+/// `regs::mac::*` helper in this module.
 #[inline]
 pub fn set_promiscuous(enable: bool) {
     // SAFETY: GMACFF is a known-valid 32-bit memory-mapped register;

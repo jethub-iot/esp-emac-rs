@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from any non-ISR context (Embassy task, blocking `main()`, host unit
   tests); `EmacInstrumentation::reset(&state)` zeroes both the sticky
   counters and the underlying hardware register.
-- `dma_regs::missed_frames()` returning `DMAMISSEDFR` as a decoded
+- `esp_emac::regs::dma::missed_frames()` returning `DMAMISSEDFR` as a decoded
   `(mfc, fifo_ovf)` pair. **Clear-on-read** — see the rustdoc for the
   consumer-side accounting requirements (`EmacInstrumentation` uses
   sticky accumulators to absorb this).
@@ -48,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   footprint ≈ 76.5 KiB; caller is responsible for the budget. Not
   enabled by default — production firmware continues to use
   `EmacDefault` / `EmacSmall`.
-- `embassy::EmacBenchDriver<'d>` — companion embassy-net driver alias
+- `embassy_net::EmacBenchDriver<'d>` — companion embassy-net driver alias
   matching the `EmacDefaultDriver` / `EmacSmallDriver` pattern, so
   callers can spell `EmacBenchDriver<'static>` instead of expanding
   `EmacDriver<'static, BENCH_RX, BENCH_TX, DEFAULT_BUF>` at every
