@@ -125,6 +125,19 @@ pub(crate) const IRQ_TIMESTAMP_NONE: u32 = u32::MAX;
 /// monitoring, histograms for diagnosing where latency is spent on
 /// the IRQ → token → DMA path. Not part of the production embassy-net
 /// data path.
+///
+/// # Single-observer convention
+///
+/// `snapshot` drains the clear-on-read `DMAMISSEDFR` hardware register
+/// into the sticky `dma_missed_frames` / `dma_fifo_overflow`
+/// accumulators with `fetch_add`. Two concurrent `snapshot()` calls
+/// race on that read: one caller observes the full hardware delta
+/// (and the accumulator advances correctly), the other observes zero
+/// and its locally-computed `snapshot_after - snapshot_before` delta
+/// is misleading. The sticky totals remain correct in either case,
+/// so a single observer reading consecutive sticky values is fine —
+/// but multi-observer setups need a `Mutex` around `snapshot()` /
+/// `reset()` if per-call deltas matter.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EmacInstrumentation {
     /// Total invocations of `Driver::receive`.
@@ -162,9 +175,14 @@ pub struct EmacInstrumentation {
     /// path; not a pure scheduling-only metric. Bucket boundaries are
     /// given by [`HISTOGRAM_UPPER_US`].
     pub rx_irq_to_token_histogram: [u32; HISTOGRAM_BUCKETS],
-    /// Distribution of TX-token-creation-to-`Emac::transmit`-completion
-    /// latency (microseconds). Bucket boundaries are given by
-    /// [`HISTOGRAM_UPPER_US`].
+    /// Distribution of `Emac::transmit` call latency (microseconds) —
+    /// timestamped immediately before the engine push and immediately
+    /// after it returns. **Does not** include the time the user closure
+    /// spent preparing the frame, nor the wait between `Driver::transmit`
+    /// returning a token and the caller calling `consume`. The bucket
+    /// captures the EMAC-side latency only: internal `copy_from_slice`
+    /// to the DMA buffer, descriptor arming, and `tx_poll_demand`.
+    /// Bucket boundaries are given by [`HISTOGRAM_UPPER_US`].
     pub tx_token_to_dma_histogram: [u32; HISTOGRAM_BUCKETS],
 }
 
