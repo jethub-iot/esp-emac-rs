@@ -33,9 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AtomicU64`); they wrap every 2³² bytes (≈ 4 GB ≈ 340 s at sustained
   100BASE-TX line rate) — callers running longer measurement windows
   should snapshot-and-reset periodically. `EmacInstrumentation::snapshot`
-  is safe from any non-ISR context (Embassy task, blocking `main()`,
-  host unit tests); `EmacInstrumentation::reset` zeroes both the sticky
-  counters and the underlying hardware register.
+  and `EmacInstrumentation::reset` are safe from any non-ISR context
+  (Embassy task, blocking `main()`) once the EMAC peripheral clock is
+  enabled — both perform a volatile MMIO read of `DMAMISSEDFR` via
+  `regs::dma::missed_frames()` and will bus-fault on hosts or before
+  `Emac::init`. `reset` zeroes both the sticky counters and the
+  underlying hardware register.
 - `esp_emac::regs::dma::missed_frames()` returning `DMAMISSEDFR` as a decoded
   `(mfc, fifo_ovf)` pair. **Clear-on-read** — see the rustdoc for the
   consumer-side accounting requirements (`EmacInstrumentation` uses
