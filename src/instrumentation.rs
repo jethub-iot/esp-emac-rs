@@ -1,0 +1,250 @@
+//! Runtime observability snapshot of EMAC traffic and DMA state.
+//!
+//! Gated behind the `instrumentation` feature. Builds without this
+//! feature pay zero — every counter, timestamp, and histogram bucket
+//! is gated.
+//!
+//! # What this module exposes
+//!
+//! - [`EmacInstrumentation`] — snapshot type holding per-token counters,
+//!   sticky DMA-error accumulators, and IRQ→token latency histograms.
+//! - [`EmacInstrumentation::snapshot`] / [`EmacInstrumentation::reset`]
+//!   — consumer-side API operating on
+//!   [`crate::embassy_net::EmacDriverState`].
+//! - [`HISTOGRAM_BUCKETS`], [`HISTOGRAM_UPPER_US`], [`histogram_bucket`]
+//!   — bucketing helpers so host-side analysers can reproduce the same
+//!   shape.
+//!
+//! The actual increment logic — ISR-side and `Driver` token-consume
+//! paths — lives in [`crate::embassy_net`] where the counters are
+//! defined as fields of [`EmacDriverState`]. That module re-uses the
+//! `now_us` and `IRQ_TIMESTAMP_NONE` items below through `pub(crate)`
+//! visibility.
+
+use core::sync::atomic::Ordering;
+
+use crate::embassy_net::EmacDriverState;
+
+/// Number of buckets in the IRQ→token latency histograms.
+///
+/// Fixed at 16 so each [`EmacInstrumentation`] consumer can iterate
+/// with a known shape and emit machine-readable output without dynamic
+/// allocation. The boundaries are intentionally log-scaled — see
+/// [`HISTOGRAM_UPPER_US`] for the exact thresholds.
+pub const HISTOGRAM_BUCKETS: usize = 16;
+
+/// Upper bound (microseconds, inclusive) for each [`HISTOGRAM_BUCKETS`]
+/// bucket. A measurement `d_us` lands in the lowest-index bucket `i`
+/// where `d_us <= HISTOGRAM_UPPER_US[i]`. The last entry is `u32::MAX`
+/// so any measurement of 100 ms or more is captured rather than lost.
+///
+/// Sequence: `1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000,
+/// 10_000, 20_000, 50_000, ≥100_000`.
+pub const HISTOGRAM_UPPER_US: [u32; HISTOGRAM_BUCKETS] = [
+    1,
+    2,
+    5,
+    10,
+    20,
+    50,
+    100,
+    200,
+    500,
+    1_000,
+    2_000,
+    5_000,
+    10_000,
+    20_000,
+    50_000,
+    u32::MAX,
+];
+
+/// Map a microsecond delta to a [`HISTOGRAM_BUCKETS`] index using the
+/// thresholds in [`HISTOGRAM_UPPER_US`]. Pure function — exposed so
+/// the same bucketing can be reproduced by host-side analysers.
+#[inline]
+#[must_use]
+pub fn histogram_bucket(d_us: u32) -> usize {
+    let mut i = 0;
+    while i < HISTOGRAM_BUCKETS {
+        if d_us <= HISTOGRAM_UPPER_US[i] {
+            return i;
+        }
+        i += 1;
+    }
+    // Unreachable — the last bucket has `u32::MAX` as its upper bound —
+    // but staying total avoids a panic in release-mode hardened builds.
+    HISTOGRAM_BUCKETS - 1
+}
+
+/// Read the Xtensa LX6 monotonic microsecond clock.
+///
+/// Wraps [`esp_hal::time::Instant::now`] and returns the elapsed-since-
+/// epoch value truncated to `u32`. The truncation wraps every ~71
+/// minutes; instrumentation deltas are computed `now.wrapping_sub(prev)`
+/// so the wrap is invisible as long as no single measurement spans
+/// 71 minutes (typical measurement windows are bounded at tens of
+/// seconds, so the budget is several orders of magnitude away).
+#[inline]
+pub(crate) fn now_us() -> u32 {
+    let dur = esp_hal::time::Instant::now()
+        .duration_since_epoch()
+        .as_micros();
+    // `as_micros` already returns `u64`; the as-cast is the explicit
+    // truncation to the wrap-aware `u32` deltas the histograms use.
+    dur as u32
+}
+
+/// Sentinel meaning "no RX IRQ timestamp recorded yet" — stored in
+/// [`EmacDriverState::last_rx_irq_us`]. Chosen as `u32::MAX`; a real
+/// `Instant::now()` returning `0xFFFF_FFFF` µs only happens at the
+/// exact tick before wrap, so the false-negative rate is one sample
+/// per ~71 minutes — well below the noise floor of the latency
+/// histogram itself.
+pub(crate) const IRQ_TIMESTAMP_NONE: u32 = u32::MAX;
+
+/// Snapshot of every counter, byte total, and IRQ→token latency
+/// histogram tracked by [`EmacDriverState`] under the `instrumentation`
+/// feature. Reads non-atomically — each field is `Relaxed`-loaded
+/// independently — so a snapshot taken concurrently with the EMAC ISR
+/// can show slightly skewed totals. **Call from non-ISR context only.**
+/// A seqlock or `portable-atomic`-backed `AtomicU64` would be required
+/// to make the snapshot internally consistent against an ISR producer,
+/// and the Xtensa LX6 has neither in hardware.
+///
+/// All byte totals are stored in kilobytes (bytes / 1024) because the
+/// Xtensa LX6 has no 64-bit atomic intrinsics — a 32-bit byte counter
+/// would wrap every ~4 GB (a few seconds of line-rate 100BASE-TX),
+/// while KB units give us ~4 TB of headroom (well past any reasonable
+/// measurement run).
+///
+/// Intended as an observability tool — counters for throughput
+/// monitoring, histograms for diagnosing where latency is spent on
+/// the IRQ → token → DMA path. Not part of the production embassy-net
+/// data path.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EmacInstrumentation {
+    /// Total invocations of `Driver::receive`.
+    pub rx_calls: u32,
+    /// `Driver::receive` invocations that returned a token pair.
+    pub rx_some: u32,
+    /// Total bytes received through the RX token's `consume`, in
+    /// kilobytes (`bytes / 1024`).
+    pub rx_bytes_kb: u32,
+    /// Frames dropped inside the RX token's `consume`.
+    pub rx_dropped: u32,
+    /// Total invocations of `Driver::transmit`.
+    pub tx_calls: u32,
+    /// `Driver::transmit` invocations that returned a token.
+    pub tx_some: u32,
+    /// Total bytes transmitted through the TX token's `consume`, in
+    /// kilobytes (`bytes / 1024`).
+    pub tx_bytes_kb: u32,
+    /// Frames dropped inside the TX token's `consume`.
+    pub tx_dropped: u32,
+    /// Sticky accumulator of the DMA Missed Frame Counter
+    /// (`DMAMISSEDFR[15:0]`). The hardware register is clear-on-read,
+    /// so [`EmacInstrumentation::snapshot`] reads it and rolls the
+    /// delta into the [`EmacDriverState`] accumulator before returning
+    /// the running total here.
+    pub dma_missed_frames: u32,
+    /// Sticky accumulator of the DMA FIFO Overflow Counter
+    /// (`DMAMISSEDFR[31:16]`). Same clear-on-read semantics as
+    /// [`Self::dma_missed_frames`].
+    pub dma_fifo_overflow: u32,
+    /// Distribution of IRQ-to-RX-token-consume latency (microseconds).
+    /// Bucket boundaries are given by [`HISTOGRAM_UPPER_US`].
+    pub rx_irq_to_token_histogram: [u32; HISTOGRAM_BUCKETS],
+    /// Distribution of TX-token-creation-to-`Emac::transmit`-completion
+    /// latency (microseconds). Bucket boundaries are given by
+    /// [`HISTOGRAM_UPPER_US`].
+    pub tx_token_to_dma_histogram: [u32; HISTOGRAM_BUCKETS],
+}
+
+impl EmacInstrumentation {
+    /// Atomically (per-field) read every instrumentation counter on
+    /// `state`, then read-and-accumulate the clear-on-read DMA
+    /// missed-frame and FIFO-overflow counters. Subsequent reads see
+    /// the running totals; the hardware register is zero after this
+    /// call.
+    ///
+    /// Safe to call from any non-ISR context — Embassy task, blocking
+    /// `main()`, host unit tests. Mixed-precision tearing between
+    /// fields is possible (see the type-level docs), but the worst
+    /// outcome is a snapshot whose `rx_calls` and `rx_some` disagree
+    /// by one or two — fine for ratio metrics.
+    #[must_use]
+    pub fn snapshot(state: &EmacDriverState) -> Self {
+        // Roll the clear-on-read DMA counters into the sticky
+        // accumulator first; `missed_frames()` clears the register, so
+        // the running total in `state` is the only source of truth
+        // going forward.
+        let (mfc_delta, ovf_delta) = crate::regs::dma::missed_frames();
+        state
+            .dma_missed_frames
+            .fetch_add(mfc_delta, Ordering::Relaxed);
+        state
+            .dma_fifo_overflow
+            .fetch_add(ovf_delta, Ordering::Relaxed);
+
+        let mut rx_hist = [0u32; HISTOGRAM_BUCKETS];
+        let mut tx_hist = [0u32; HISTOGRAM_BUCKETS];
+        for (i, b) in rx_hist.iter_mut().enumerate() {
+            *b = state.rx_irq_to_token_us[i].load(Ordering::Relaxed);
+        }
+        for (i, b) in tx_hist.iter_mut().enumerate() {
+            *b = state.tx_token_to_dma_us[i].load(Ordering::Relaxed);
+        }
+
+        Self {
+            rx_calls: state.drv_rx_calls.load(Ordering::Relaxed),
+            rx_some: state.drv_rx_some.load(Ordering::Relaxed),
+            rx_bytes_kb: state.drv_rx_bytes_kb.load(Ordering::Relaxed),
+            rx_dropped: state.drv_rx_dropped.load(Ordering::Relaxed),
+            tx_calls: state.drv_tx_calls.load(Ordering::Relaxed),
+            tx_some: state.drv_tx_some.load(Ordering::Relaxed),
+            tx_bytes_kb: state.drv_tx_bytes_kb.load(Ordering::Relaxed),
+            tx_dropped: state.drv_tx_dropped.load(Ordering::Relaxed),
+            dma_missed_frames: state.dma_missed_frames.load(Ordering::Relaxed),
+            dma_fifo_overflow: state.dma_fifo_overflow.load(Ordering::Relaxed),
+            rx_irq_to_token_histogram: rx_hist,
+            tx_token_to_dma_histogram: tx_hist,
+        }
+    }
+
+    /// Zero every instrumentation counter on `state` and clear the
+    /// DMA missed-frame / FIFO-overflow hardware register so the next
+    /// [`EmacInstrumentation::snapshot`] starts from a clean baseline.
+    ///
+    /// Per-field stores are `Relaxed`; this is not synchronization but
+    /// a "best-effort" reset between measurement windows. The ISR may
+    /// continue to bump counters while `reset` runs — the worst case
+    /// is that a few post-reset events land in the new window with
+    /// pre-reset history attached, which is fine for the
+    /// stage-comparison this API exists to support.
+    pub fn reset(state: &EmacDriverState) {
+        // Drain the clear-on-read hardware counter into the void —
+        // we are about to zero the sticky accumulator anyway.
+        let _ = crate::regs::dma::missed_frames();
+
+        state.drv_rx_calls.store(0, Ordering::Relaxed);
+        state.drv_rx_some.store(0, Ordering::Relaxed);
+        state.drv_rx_bytes_kb.store(0, Ordering::Relaxed);
+        state.drv_rx_dropped.store(0, Ordering::Relaxed);
+        state.drv_tx_calls.store(0, Ordering::Relaxed);
+        state.drv_tx_some.store(0, Ordering::Relaxed);
+        state.drv_tx_bytes_kb.store(0, Ordering::Relaxed);
+        state.drv_tx_dropped.store(0, Ordering::Relaxed);
+        state.dma_missed_frames.store(0, Ordering::Relaxed);
+        state.dma_fifo_overflow.store(0, Ordering::Relaxed);
+        state
+            .last_rx_irq_us
+            .store(IRQ_TIMESTAMP_NONE, Ordering::Relaxed);
+        for b in &state.rx_irq_to_token_us {
+            b.store(0, Ordering::Relaxed);
+        }
+        for b in &state.tx_token_to_dma_us {
+            b.store(0, Ordering::Relaxed);
+        }
+    }
+}
