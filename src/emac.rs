@@ -73,9 +73,17 @@ pub struct Emac<const RX: usize = 10, const TX: usize = 10, const BUF: usize = 1
     /// `None` означает что speed ещё не applied (default до первого set_speed call).
     /// PHY-link state polling caps `set_speed` every cycle — без guard'a получаем
     /// redundant MMIO writes на каждом poll regardless of whether parameters changed.
+    ///
+    /// **Caveat:** этот cache может стать stale если consumer обходит API через
+    /// прямые вызовы [`crate::regs::mac::set_speed_100mbps`] /
+    /// [`crate::regs::mac::set_duplex_full`]. Mixing high-level
+    /// [`Self::set_speed`] / [`Self::set_duplex`] with these low-level helpers
+    /// **not supported** — invokes UB-style behavior где idempotency guard
+    /// будет early-return на stale cached value. Use one or the other API.
     #[cfg(feature = "mdio-phy")]
     current_speed: Option<Speed>,
-    /// Last applied duplex setting; analogous to `current_speed`.
+    /// Last applied duplex setting; analogous to `current_speed` (same caveat
+    /// про mixing с `regs::mac::set_duplex_full`).
     #[cfg(feature = "mdio-phy")]
     current_duplex: Option<Duplex>,
 }
@@ -149,7 +157,7 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             return;
         }
         // Idempotency guard — avoid redundant MMIO writes when PHY reports
-        // unchanged link parameters (link-state polling every 500 ms ranee
+        // unchanged link parameters (link-state polling every 500 ms ранее
         // would issue a write at каждый poll regardless of change).
         if self.current_speed == Some(speed) {
             return;

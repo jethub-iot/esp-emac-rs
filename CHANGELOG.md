@@ -92,7 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   polling reports steady link. Adds private cached `current_speed` /
   `current_duplex` fields. No public API change.
 
-Backport plan и reasoning: see [testsuite-firmware spec](https://github.com/jethome-iot/testsystem-firmware-esp/blob/main/docs/superpowers/specs/2026-05-19-esp-hal-fork-and-backports-strategy-design.md) §3.1.
+Backport plan и reasoning: see [testsystem-firmware-esp spec](https://github.com/jethome-iot/testsystem-firmware-esp/blob/main/docs/superpowers/specs/2026-05-19-esp-hal-fork-and-backports-strategy-design.md) §3.1.
 
 ### Notes
 
