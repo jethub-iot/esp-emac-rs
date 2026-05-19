@@ -187,11 +187,11 @@ impl TxDescriptor {
     /// Does **not** set the OWN bit — call [`set_owned`](Self::set_owned)
     /// afterwards to submit to DMA.
     ///
-    /// CIC (Checksum Insertion Control) is always set to 0b11 (bits 23:22),
-    /// which instructs the MAC to insert the IPv4 header checksum and the
-    /// TCP/UDP/ICMP payload checksum including the pseudo-header. For
-    /// non-IPv4 frames the MAC ignores the CIC field, so setting it
-    /// unconditionally is safe.
+    /// CIC (Checksum Insertion Control) is left at `0b00` — hardware
+    /// checksum offload is disabled because the Synopsys GMAC checksum
+    /// engine produces incorrect TCP/UDP checksums on ESP32 rev v3.1
+    /// silicon. smoltcp computes checksums in software instead (see
+    /// `Driver::capabilities` advertising `ChecksumCapabilities::default()`).
     pub fn prepare(&self, len: usize, first: bool, last: bool) {
         // Hardware checksum offload (CIC bits in TDES0[23:22]) is **disabled**
         // because it produces frames with broken TCP/UDP checksums on ESP32
