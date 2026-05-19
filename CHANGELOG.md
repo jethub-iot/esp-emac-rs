@@ -74,25 +74,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Backports from upstream esp-hal
 
-После merge of esp-rs/esp-hal ESP32 ethernet support, в этот release добавлены три low-risk pattern из upstream:
+After the merge of esp-rs/esp-hal ESP32 ethernet support, this release adds three low-risk patterns ported back from upstream:
 
-- **B2.1** — `Acquire`/`Release` memory fences вокруг DMA ownership transitions
-  в `dma/engine.rs`. Internal correctness fix per Rust memory model: на ESP32
-  LX6 без write-back data cache fences действуют как compiler fences,
-  предотвращая reorder data writes относительно OWN bit updates. Placement
-  verified против ESP-IDF reference implementation
-  (`components/esp_eth/src/mac/esp_eth_mac_esp_dma.c`):
-  TX commit — fence(Release) ПЕРЕД OWN write; RX recycle — fence(Release)
-  ПОСЛЕ OWN write (no payload writes precede OWN). No public API change.
+- **B2.1** — `Acquire`/`Release` memory fences around DMA ownership
+  transitions in `dma/engine.rs`. Internal correctness fix per the Rust
+  memory model: ESP32 LX6 has no write-back data cache so these fences
+  act as compiler fences, preventing reorder of data writes against the
+  OWN bit updates. Placement was verified against the ESP-IDF reference
+  implementation (`components/esp_eth/src/mac/esp_eth_mac_esp_dma.c`):
+  TX commit uses `fence(Release)` BEFORE the OWN write; RX recycle uses
+  `fence(Release)` AFTER the OWN write (no payload writes precede OWN).
+  No public API change.
 - **B2.3** — Compile-time `const _: () = assert!(size_of::<TDes>() == 32)`
-  together with `offset_of!` assertions для `TxDescriptor`/`RxDescriptor`.
+  together with `offset_of!` assertions for `TxDescriptor`/`RxDescriptor`.
   Catches silent layout regressions at build time instead of test execution.
-- **B2.4** — Idempotent `set_speed`/`set_duplex` guards. Calls с unchanged
-  value теперь no-op — avoids redundant MMIO writes when PHY-link state
-  polling reports steady link. Adds private cached `current_speed` /
-  `current_duplex` fields. No public API change.
+- **B2.4** — Idempotent `set_speed`/`set_duplex` guards. Calls with an
+  unchanged value are now no-ops, avoiding redundant MMIO writes when
+  PHY-link state polling reports a steady link. Adds private cached
+  `current_speed` / `current_duplex` fields. No public API change.
 
-Backport plan и reasoning: see [testsystem-firmware-esp spec](https://github.com/jethome-iot/testsystem-firmware-esp/blob/main/docs/superpowers/specs/2026-05-19-esp-hal-fork-and-backports-strategy-design.md) §3.1.
+Backport plan and reasoning: see the [testsystem-firmware-esp spec](https://github.com/jethome-iot/testsystem-firmware-esp/blob/main/docs/superpowers/specs/2026-05-19-esp-hal-fork-and-backports-strategy-design.md) §3.1.
 
 ### Notes
 

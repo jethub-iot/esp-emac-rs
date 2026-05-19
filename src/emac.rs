@@ -69,21 +69,23 @@ pub struct Emac<const RX: usize = 10, const TX: usize = 10, const BUF: usize = 1
     config: EmacConfig,
     state: EmacState,
     mac_address: [u8; 6],
-    /// Last applied speed setting; idempotency guard в [`Self::set_speed`].
-    /// `None` означает что speed ещё не applied (default до первого set_speed call).
-    /// PHY-link state polling caps `set_speed` every cycle — без guard'a получаем
-    /// redundant MMIO writes на каждом poll regardless of whether parameters changed.
+    /// Last applied speed setting; idempotency guard for [`Self::set_speed`].
+    /// `None` means speed has not been applied yet (default before first
+    /// `set_speed` call). PHY-link state polling calls `set_speed` every
+    /// cycle — without the guard each call would issue a redundant MMIO
+    /// write regardless of whether the parameters actually changed.
     ///
-    /// **Caveat:** этот cache может стать stale если consumer обходит API через
-    /// прямые вызовы [`crate::regs::mac::set_speed_100mbps`] /
-    /// [`crate::regs::mac::set_duplex_full`]. Mixing high-level
-    /// [`Self::set_speed`] / [`Self::set_duplex`] with these low-level helpers
-    /// **not supported** — invokes UB-style behavior где idempotency guard
-    /// будет early-return на stale cached value. Use one or the other API.
+    /// **Caveat:** this cache can become stale if a consumer bypasses the
+    /// API by calling [`crate::regs::mac::set_speed_100mbps`] /
+    /// [`crate::regs::mac::set_duplex_full`] directly. Mixing the high-level
+    /// [`Self::set_speed`] / [`Self::set_duplex`] with those low-level
+    /// helpers is **not supported** — the idempotency guard will early-return
+    /// on a stale cached value and leave the hardware configured against
+    /// expectations. Pick one API and stick with it.
     #[cfg(feature = "mdio-phy")]
     current_speed: Option<Speed>,
-    /// Last applied duplex setting; analogous to `current_speed` (same caveat
-    /// про mixing с `regs::mac::set_duplex_full`).
+    /// Last applied duplex setting; analogous to `current_speed` (same
+    /// caveat about mixing with `regs::mac::set_duplex_full`).
     #[cfg(feature = "mdio-phy")]
     current_duplex: Option<Duplex>,
 }
@@ -157,8 +159,8 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             return;
         }
         // Idempotency guard — avoid redundant MMIO writes when PHY reports
-        // unchanged link parameters (link-state polling every 500 ms ранее
-        // would issue a write at каждый poll regardless of change).
+        // unchanged link parameters. Without the guard, link-state polling
+        // every 500 ms would issue a write at every poll regardless of change.
         if self.current_speed == Some(speed) {
             return;
         }
