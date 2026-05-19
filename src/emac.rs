@@ -322,19 +322,26 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         // 8. MAC configuration defaults: 100 Mbps full duplex, port select,
         //    auto pad/CRC strip, jabber + watchdog disabled.
         //
-        //    CHECKSUM_OFFLOAD (IPC, bit 10): enables RX IPv4/TCP/UDP/ICMP
-        //    checksum verification. The MAC stores the result in RDES4
-        //    (extended descriptor, ATDS=1). With DMAOPERATION.DT=0 (our
-        //    default), the DMA automatically drops frames with checksum
-        //    errors before they reach the CPU, so the SW receive path
-        //    sees only frames the hardware has verified as good.
+        //    CHECKSUM_OFFLOAD (IPC, bit 10) is **disabled**. The ESP32 GMAC
+        //    checksum engine on at least rev v3.1 silicon is unreliable for
+        //    both directions:
+        //      * TX insertion (TDES0.CIC=0b11) produced bad checksums and
+        //        broke TCP throughput after the first MSS-sized segment
+        //        (see `TxDescriptor::prepare`).
+        //      * RX verification (IPC=1) symmetrically marks valid frames
+        //        as having checksum errors, which the DMA then drops at
+        //        DMAOPERATION.DT=0 before they reach the CPU. This was
+        //        observed as iperf2 downlink throughput collapsing to
+        //        0 Mbps while uplink still trickled data through.
+        //    Both sides therefore stay off and smoltcp computes / verifies
+        //    IPv4/TCP/UDP/ICMP checksums in software (see
+        //    `Driver::capabilities` advertising `ChecksumCapabilities::default()`).
         let mac_cfg = config::PORT_SELECT
             | config::SPEED_100
             | config::DUPLEX_FULL
             | config::AUTO_PAD_CRC_STRIP
             | config::JABBER_DISABLE
-            | config::WATCHDOG_DISABLE
-            | config::CHECKSUM_OFFLOAD;
+            | config::WATCHDOG_DISABLE;
         mac_regs::set_config(mac_cfg);
 
         // Frame filter: pass all multicast (broadcast accepted by default).

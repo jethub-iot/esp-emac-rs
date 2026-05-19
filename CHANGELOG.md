@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-05-19
+
+### Fixed
+
+- **Disable hardware checksum offload in both directions — engine is broken
+  on ESP32 rev v3.1 silicon.** The v0.3.0 release enabled `TDES0.CIC = 0b11`
+  (TX insertion) and `GMACCONFIG.IPC = 1` (RX verification) together and
+  told smoltcp to skip software computation. Both sides turn out to be
+  unreliable on at least rev v3.1:
+  - TX: the iperf2 client header (60 B) reaches the peer, but every
+    subsequent bulk segment carries a wrong TCP/UDP checksum and is
+    dropped, so the TCP connection collapses after ~15 s.
+  - RX: `GMACCONFIG.IPC = 1` symmetrically marked valid incoming TCP/UDP
+    frames as checksum-errored, which the DMA then dropped at
+    `DMAOPERATION.DT = 0` before the CPU descriptor ring saw them.
+    Empirical signature: iperf2 downlink throughput collapsing to 0 Mbps
+    while uplink still trickled data through.
+  Both bits are now `0`. `Driver::capabilities()` advertises
+  `ChecksumCapabilities::default()` so smoltcp computes and verifies
+  IPv4/TCP/UDP/ICMP checksums in software. The cost is a few extra cycles
+  per packet in either direction; bench data is documented in the release
+  notes.
+
 ## [0.4.0] - 2026-05-19
 
 ### Changed (breaking — module rename)
