@@ -152,9 +152,13 @@ use core::task::Context;
 
 use critical_section::Mutex;
 use embassy_net_driver::{
-    Capabilities, Checksum, ChecksumCapabilities, Driver, HardwareAddress, LinkState, RxToken,
-    TxToken,
+    Capabilities, ChecksumCapabilities, Driver, HardwareAddress, LinkState, RxToken, TxToken,
 };
+// `Checksum` is only referenced by the capabilities self-test that asserts
+// every protocol is computed in software (HW offload disabled — see
+// `Driver::capabilities` comment).
+#[cfg(test)]
+use embassy_net_driver::Checksum;
 use embassy_sync::waitqueue::AtomicWaker;
 
 use crate::emac::{
