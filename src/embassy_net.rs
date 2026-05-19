@@ -820,22 +820,21 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Driver for EmacDriver<'
         caps.max_transmission_unit = Self::effective_mtu();
         caps.max_burst_size = Some(1);
 
-        // Hardware checksum offload is **disabled** on this driver
-        // because the ESP32 GMAC checksum engine produces incorrect TCP
-        // and UDP checksums on at least rev v3.1 silicon, dropping any
-        // sustained TCP flow after the first MSS-sized segment. See
-        // `TxDescriptor::prepare` for the wire-side evidence and the
-        // history of how this was discovered. The driver therefore
-        // advertises `ChecksumCapabilities::default()` (smoltcp computes
-        // IPv4/TCP/UDP/ICMP checksums in software) and keeps `TDES0.CIC`
-        // at 0 so the MAC leaves the checksum bytes alone.
-        //
-        // RX side: `GMACCONFIG.IPC` is still enabled by `mac_init`, which
-        // means the DMA drops frames whose IP/TCP/UDP checksums fail
-        // hardware verification before the CPU descriptor ring sees them.
-        // The HW checksum verification path is independent from the broken
-        // TX insertion path and remains useful — bad frames stay out of
-        // the host queue.
+        // Hardware checksum offload is **disabled** in both directions on
+        // this driver because the ESP32 GMAC checksum engine is unreliable
+        // on at least rev v3.1 silicon:
+        //   * TX insertion (`TDES0.CIC=0b11`) emitted wrong TCP/UDP
+        //     checksums, breaking sustained TCP flow after the first
+        //     MSS-sized segment (see `TxDescriptor::prepare`).
+        //   * RX verification (`GMACCONFIG.IPC=1`) symmetrically marked
+        //     valid incoming TCP/UDP frames as checksum-errored, causing
+        //     the DMA to drop them at `DMAOPERATION.DT=0` before they
+        //     reached the CPU. The empirical signature was iperf2 downlink
+        //     collapsing to 0 Mbps while uplink kept working.
+        // Both `TDES0.CIC` and `GMACCONFIG.IPC` are therefore left at 0
+        // (see `mac_init` in `emac.rs`), and this driver advertises
+        // `ChecksumCapabilities::default()` so smoltcp computes and
+        // verifies IPv4/TCP/UDP/ICMP checksums in software.
         caps.checksum = ChecksumCapabilities::default();
         caps
     }
