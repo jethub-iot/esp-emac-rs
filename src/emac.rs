@@ -69,6 +69,15 @@ pub struct Emac<const RX: usize = 10, const TX: usize = 10, const BUF: usize = 1
     config: EmacConfig,
     state: EmacState,
     mac_address: [u8; 6],
+    /// Last applied speed setting; idempotency guard в [`Self::set_speed`].
+    /// `None` означает что speed ещё не applied (default до первого set_speed call).
+    /// PHY-link state polling caps `set_speed` every cycle — без guard'a получаем
+    /// redundant MMIO writes на каждом poll regardless of whether parameters changed.
+    #[cfg(feature = "mdio-phy")]
+    current_speed: Option<Speed>,
+    /// Last applied duplex setting; analogous to `current_speed`.
+    #[cfg(feature = "mdio-phy")]
+    current_duplex: Option<Duplex>,
 }
 
 impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
@@ -79,6 +88,10 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             config,
             state: EmacState::Uninitialized,
             mac_address: [0; 6],
+            #[cfg(feature = "mdio-phy")]
+            current_speed: None,
+            #[cfg(feature = "mdio-phy")]
+            current_duplex: None,
         }
     }
 
@@ -135,6 +148,12 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         if self.state == EmacState::Uninitialized {
             return;
         }
+        // Idempotency guard — avoid redundant MMIO writes when PHY reports
+        // unchanged link parameters (link-state polling every 500 ms ranee
+        // would issue a write at каждый poll regardless of change).
+        if self.current_speed == Some(speed) {
+            return;
+        }
         let is_100 = match speed {
             Speed::Mbps10 => false,
             Speed::Mbps100 => true,
@@ -148,6 +167,7 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             }
         };
         mac_regs::set_speed_100mbps(is_100);
+        self.current_speed = Some(speed);
     }
 
     /// Apply the duplex mode reported by the PHY.
@@ -165,6 +185,10 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         if self.state == EmacState::Uninitialized {
             return;
         }
+        // Idempotency guard — see [`Self::set_speed`].
+        if self.current_duplex == Some(duplex) {
+            return;
+        }
         let is_full = match duplex {
             Duplex::Half => false,
             Duplex::Full => true,
@@ -178,6 +202,7 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             }
         };
         mac_regs::set_duplex_full(is_full);
+        self.current_duplex = Some(duplex);
     }
 
     // ── Initialization ─────────────────────────────────────────────────────
