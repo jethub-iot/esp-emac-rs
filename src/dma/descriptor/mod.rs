@@ -120,6 +120,17 @@ pub struct TxDescriptor {
     _ts_high: VolatileCell<u32>,
 }
 
+// Verify size and field offsets at compile time. These guard against silent
+// layout regressions if anyone reorders or adds fields — DMA hardware reads
+// descriptor words at fixed offsets, so wrong layout = silent corruption.
+// Matches upstream esp-hal pattern in src/ethernet/dma.rs:118-123.
+const _: () = assert!(core::mem::size_of::<TxDescriptor>() == 32);
+const _: () = assert!(core::mem::align_of::<TxDescriptor>() >= 4);
+const _: () = assert!(core::mem::offset_of!(TxDescriptor, tdes0) == 0);
+const _: () = assert!(core::mem::offset_of!(TxDescriptor, tdes1) == 4);
+const _: () = assert!(core::mem::offset_of!(TxDescriptor, buffer_addr) == 8);
+const _: () = assert!(core::mem::offset_of!(TxDescriptor, next_desc_addr) == 12);
+
 #[allow(dead_code)]
 impl TxDescriptor {
     /// Descriptor size in bytes (enhanced 8-word layout).
@@ -290,6 +301,14 @@ pub struct RxDescriptor {
     /// RDES7: Timestamp high (when timestamping is enabled).
     _ts_high: VolatileCell<u32>,
 }
+
+// Verify size and field offsets at compile time. See note on TxDescriptor above.
+const _: () = assert!(core::mem::size_of::<RxDescriptor>() == 32);
+const _: () = assert!(core::mem::align_of::<RxDescriptor>() >= 4);
+const _: () = assert!(core::mem::offset_of!(RxDescriptor, rdes0) == 0);
+const _: () = assert!(core::mem::offset_of!(RxDescriptor, rdes1) == 4);
+const _: () = assert!(core::mem::offset_of!(RxDescriptor, buffer_addr) == 8);
+const _: () = assert!(core::mem::offset_of!(RxDescriptor, next_desc_addr) == 12);
 
 #[allow(dead_code)]
 impl RxDescriptor {
