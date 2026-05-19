@@ -69,6 +69,25 @@ pub struct Emac<const RX: usize = 10, const TX: usize = 10, const BUF: usize = 1
     config: EmacConfig,
     state: EmacState,
     mac_address: [u8; 6],
+    /// Last applied speed setting; idempotency guard for [`Self::set_speed`].
+    /// `None` means speed has not been applied yet (default before first
+    /// `set_speed` call). PHY-link state polling calls `set_speed` every
+    /// cycle — without the guard each call would issue a redundant MMIO
+    /// write regardless of whether the parameters actually changed.
+    ///
+    /// **Caveat:** this cache can become stale if a consumer bypasses the
+    /// API by calling [`crate::regs::mac::set_speed_100mbps`] /
+    /// [`crate::regs::mac::set_duplex_full`] directly. Mixing the high-level
+    /// [`Self::set_speed`] / [`Self::set_duplex`] with those low-level
+    /// helpers is **not supported** — the idempotency guard will early-return
+    /// on a stale cached value and leave the hardware configured against
+    /// expectations. Pick one API and stick with it.
+    #[cfg(feature = "mdio-phy")]
+    current_speed: Option<Speed>,
+    /// Last applied duplex setting; analogous to `current_speed` (same
+    /// caveat about mixing with `regs::mac::set_duplex_full`).
+    #[cfg(feature = "mdio-phy")]
+    current_duplex: Option<Duplex>,
 }
 
 impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
@@ -79,6 +98,10 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             config,
             state: EmacState::Uninitialized,
             mac_address: [0; 6],
+            #[cfg(feature = "mdio-phy")]
+            current_speed: None,
+            #[cfg(feature = "mdio-phy")]
+            current_duplex: None,
         }
     }
 
@@ -135,6 +158,12 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         if self.state == EmacState::Uninitialized {
             return;
         }
+        // Idempotency guard — avoid redundant MMIO writes when PHY reports
+        // unchanged link parameters. Without the guard, link-state polling
+        // every 500 ms would issue a write at every poll regardless of change.
+        if self.current_speed == Some(speed) {
+            return;
+        }
         let is_100 = match speed {
             Speed::Mbps10 => false,
             Speed::Mbps100 => true,
@@ -148,6 +177,7 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             }
         };
         mac_regs::set_speed_100mbps(is_100);
+        self.current_speed = Some(speed);
     }
 
     /// Apply the duplex mode reported by the PHY.
@@ -165,6 +195,10 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         if self.state == EmacState::Uninitialized {
             return;
         }
+        // Idempotency guard — see [`Self::set_speed`].
+        if self.current_duplex == Some(duplex) {
+            return;
+        }
         let is_full = match duplex {
             Duplex::Half => false,
             Duplex::Full => true,
@@ -178,6 +212,7 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             }
         };
         mac_regs::set_duplex_full(is_full);
+        self.current_duplex = Some(duplex);
     }
 
     // ── Initialization ─────────────────────────────────────────────────────
