@@ -7,6 +7,8 @@
 //! a high-level interface for frame transmission and reception without
 //! any register access. Register programming is handled by the caller.
 
+use core::sync::atomic::{fence, Ordering};
+
 use crate::dma::descriptor::{RxDescriptor, TxDescriptor};
 use crate::dma::ring::DescriptorRing;
 use crate::error::EmacError;
@@ -71,6 +73,12 @@ impl<const RX: usize, const TX: usize, const BUF: usize> DmaEngine<RX, TX, BUF> 
         self.rx_ring.reset();
         self.tx_ring.reset();
         self.initialized = true;
+
+        // Ensure all descriptor setup writes (buffer pointers, chain links,
+        // OWN bits set by reset()) are visible to DMA before the caller programs
+        // the descriptor base address into hardware. Без fence компилятор может
+        // reorder return value computation before descriptor writes.
+        fence(Ordering::Release);
 
         let rx_base = self.rx_ring.base_addr() as u32;
         let tx_base = self.tx_ring.base_addr() as u32;
@@ -161,11 +169,21 @@ impl<const RX: usize, const TX: usize, const BUF: usize> DmaEngine<RX, TX, BUF> 
             offset += chunk_size;
         }
 
+        // Ensure payload writes (buffer data, length, flags via prepare()) are
+        // visible to DMA before any OWN bit handoff. On ESP32 LX6 без write-back
+        // cache это compiler fence — компилятор не может reorder data writes
+        // after the OWN write below. Matches upstream esp-hal TX commit pattern.
+        fence(Ordering::Release);
+
         // Give to DMA in reverse order (prevents race condition).
         for i in (0..desc_count).rev() {
             let idx = (current + i) % TX;
             self.tx_ring.get(idx).set_owned();
         }
+
+        // Order OWN writes against subsequent ring-index update and any TX
+        // poll-demand register write the caller may issue.
+        fence(Ordering::Release);
 
         self.tx_ring.advance_by(desc_count);
         Ok(data.len())
@@ -175,6 +193,8 @@ impl<const RX: usize, const TX: usize, const BUF: usize> DmaEngine<RX, TX, BUF> 
     ///
     /// Returns the number of descriptors reclaimed.
     pub fn tx_reclaim(&mut self) -> usize {
+        // Sync с DMA writes до того как мы читаем descriptor OWN bits.
+        fence(Ordering::Acquire);
         let mut reclaimed = 0;
         for i in 0..TX {
             let idx = (self.tx_ring.current_index() + i) % TX;
@@ -207,6 +227,8 @@ impl<const RX: usize, const TX: usize, const BUF: usize> DmaEngine<RX, TX, BUF> 
     ///    untouched error descriptors.
     #[must_use]
     pub fn rx_available(&self) -> bool {
+        // Sync с DMA writes до того как мы читаем descriptor state.
+        fence(Ordering::Acquire);
         let desc = self.rx_ring.current();
         if desc.is_owned() {
             return false;
@@ -225,6 +247,8 @@ impl<const RX: usize, const TX: usize, const BUF: usize> DmaEngine<RX, TX, BUF> 
     /// For single-descriptor frames, copies payload from the RX buffer.
     /// For multi-descriptor frames, copies from each descriptor's buffer.
     pub fn receive(&mut self, buffer: &mut [u8]) -> Result<Option<usize>, EmacError> {
+        // Sync с DMA writes до того как мы читаем descriptor state + payload.
+        fence(Ordering::Acquire);
         let first_desc = self.rx_ring.current();
 
         // Not owned by CPU — no frame ready.
@@ -236,6 +260,13 @@ impl<const RX: usize, const TX: usize, const BUF: usize> DmaEngine<RX, TX, BUF> 
         if first_desc.is_first() && first_desc.is_last() {
             if first_desc.has_error() {
                 first_desc.recycle();
+                // RX recycle uses fence-after-OWN (not fence-before-OWN like TX
+                // commit) because at recycle point no payload writes precede OWN
+                // — buffer/size were set in init. Fence orders OWN write against
+                // subsequent ring-index update и any RX poll-demand register
+                // write. Matches ESP-IDF emac_esp_dma_receive_frame() pattern
+                // (OWN write then DMA_CACHE_WB, no-op on ESP32 без write-back).
+                fence(Ordering::Release);
                 self.rx_ring.advance();
                 return Err(EmacError::FrameError);
             }
@@ -243,6 +274,7 @@ impl<const RX: usize, const TX: usize, const BUF: usize> DmaEngine<RX, TX, BUF> 
             let frame_len = first_desc.payload_length();
             if buffer.len() < frame_len {
                 first_desc.recycle();
+                fence(Ordering::Release);
                 self.rx_ring.advance();
                 return Err(EmacError::BufferTooSmall);
             }
@@ -250,6 +282,7 @@ impl<const RX: usize, const TX: usize, const BUF: usize> DmaEngine<RX, TX, BUF> 
             let idx = self.rx_ring.current_index();
             buffer[..frame_len].copy_from_slice(&self.rx_buffers[idx][..frame_len]);
             first_desc.recycle();
+            fence(Ordering::Release);
             self.rx_ring.advance();
             return Ok(Some(frame_len));
         }
@@ -317,6 +350,10 @@ impl<const RX: usize, const TX: usize, const BUF: usize> DmaEngine<RX, TX, BUF> 
             self.rx_ring.get(idx).recycle();
         }
 
+        // Single fence after batch of recycles — orders all OWN writes against
+        // subsequent ring-index update. See single-descriptor path для full
+        // reasoning про fence-after-OWN pattern.
+        fence(Ordering::Release);
         self.rx_ring.advance_by(desc_count);
         Ok(Some(frame_len))
     }
@@ -324,6 +361,8 @@ impl<const RX: usize, const TX: usize, const BUF: usize> DmaEngine<RX, TX, BUF> 
     /// Get the length of the next available frame without consuming it.
     #[must_use]
     pub fn peek_frame_length(&self) -> Option<usize> {
+        // Sync с DMA writes до того как мы читаем descriptor state.
+        fence(Ordering::Acquire);
         let desc = self.rx_ring.current();
 
         if desc.is_owned() {
@@ -379,6 +418,7 @@ impl<const RX: usize, const TX: usize, const BUF: usize> DmaEngine<RX, TX, BUF> 
 
     /// Discard the current RX frame (for errors or incomplete frames).
     fn flush_rx_frame(&mut self) {
+        fence(Ordering::Acquire);
         loop {
             let desc = self.rx_ring.current();
 
@@ -388,6 +428,10 @@ impl<const RX: usize, const TX: usize, const BUF: usize> DmaEngine<RX, TX, BUF> 
 
             let is_last = desc.is_last();
             desc.recycle();
+            // Per-iteration fence — каждый recycle handoff'ит OWN под DMA,
+            // и нам нужен ordering vs subsequent loop iteration's reading
+            // of the next descriptor's state and ring advance.
+            fence(Ordering::Release);
             self.rx_ring.advance();
 
             if is_last {
