@@ -816,28 +816,23 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Driver for EmacDriver<'
         caps.max_transmission_unit = Self::effective_mtu();
         caps.max_burst_size = Some(1);
 
-        // Hardware checksum offload is enabled on this driver:
+        // Hardware checksum offload is **disabled** on this driver
+        // because the ESP32 GMAC checksum engine produces incorrect TCP
+        // and UDP checksums on at least rev v3.1 silicon, dropping any
+        // sustained TCP flow after the first MSS-sized segment. See
+        // `TxDescriptor::prepare` for the wire-side evidence and the
+        // history of how this was discovered. The driver therefore
+        // advertises `ChecksumCapabilities::default()` (smoltcp computes
+        // IPv4/TCP/UDP/ICMP checksums in software) and keeps `TDES0.CIC`
+        // at 0 so the MAC leaves the checksum bytes alone.
         //
-        // TX: TDES0.CIC = 0b11 instructs the GMAC to insert IPv4 header
-        //     and TCP/UDP/ICMP (with pseudo-header) checksums on every
-        //     outgoing frame. smoltcp must NOT compute them in software.
-        //
-        // RX: GMACCONFIG.IPC = 1 enables hardware checksum verification.
-        //     With DMAOPERATION.DT = 0 (default), the DMA automatically
-        //     drops frames whose IP/TCP/UDP checksums fail before the CPU
-        //     descriptor ring sees them. Frames that reach our `receive()`
-        //     path have already passed HW verification; smoltcp need not
-        //     re-verify.
-        //
-        // Tell smoltcp to skip both TX computation and RX verification for
-        // the four offloaded protocols. `Checksum::None` means "hardware
-        // handles it, don't touch".
-        let mut cs = ChecksumCapabilities::default();
-        cs.ipv4 = Checksum::None;
-        cs.tcp = Checksum::None;
-        cs.udp = Checksum::None;
-        cs.icmpv4 = Checksum::None;
-        caps.checksum = cs;
+        // RX side: `GMACCONFIG.IPC` is still enabled by `mac_init`, which
+        // means the DMA drops frames whose IP/TCP/UDP checksums fail
+        // hardware verification before the CPU descriptor ring sees them.
+        // The HW checksum verification path is independent from the broken
+        // TX insertion path and remains useful — bad frames stay out of
+        // the host queue.
+        caps.checksum = ChecksumCapabilities::default();
         caps
     }
 
@@ -908,28 +903,31 @@ mod tests {
     }
 
     #[test]
-    fn driver_capabilities_checksum_offloaded() {
-        // Hardware checksum offload: smoltcp must not compute or verify any
-        // of the four protocols. Checksum::None means "hardware handles it".
+    fn driver_capabilities_checksum_software() {
+        // HW checksum offload is disabled (broken on ESP32 rev v3.1 — see
+        // `TxDescriptor::prepare` and `Driver::capabilities` comments).
+        // smoltcp must compute IPv4/TCP/UDP/ICMP checksums in software,
+        // which corresponds to `ChecksumCapabilities::default()`. Every
+        // protocol must be in the `Both` (or equivalent enabled) state.
         let mut emac = test_emac();
         let state = EmacDriverState::new();
         let driver = EmacDriver::new(&mut emac, &state);
         let caps = driver.capabilities();
         assert!(
-            matches!(caps.checksum.ipv4, Checksum::None),
-            "IPv4 checksum must be offloaded to hardware"
+            !matches!(caps.checksum.ipv4, Checksum::None),
+            "IPv4 checksum must be computed by smoltcp (HW offload disabled)"
         );
         assert!(
-            matches!(caps.checksum.tcp, Checksum::None),
-            "TCP checksum must be offloaded to hardware"
+            !matches!(caps.checksum.tcp, Checksum::None),
+            "TCP checksum must be computed by smoltcp (HW offload disabled)"
         );
         assert!(
-            matches!(caps.checksum.udp, Checksum::None),
-            "UDP checksum must be offloaded to hardware"
+            !matches!(caps.checksum.udp, Checksum::None),
+            "UDP checksum must be computed by smoltcp (HW offload disabled)"
         );
         assert!(
-            matches!(caps.checksum.icmpv4, Checksum::None),
-            "ICMPv4 checksum must be offloaded to hardware"
+            !matches!(caps.checksum.icmpv4, Checksum::None),
+            "ICMPv4 checksum must be computed by smoltcp (HW offload disabled)"
         );
     }
 

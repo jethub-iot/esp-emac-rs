@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-05-19
+
+### Fixed
+
+- **Disable hardware checksum offload — TX path was broken on ESP32 rev v3.1**
+  silicon. The v0.3.0 release enabled `TDES0.CIC = 0b11` (full TCP/UDP/ICMP +
+  IPv4-header checksum insertion) and told smoltcp to skip software computation,
+  but the Synopsys GMAC checksum engine produces incorrect TCP/UDP checksums on
+  at least rev v3.1: the iperf2 client header (60 B) reaches the peer, every
+  subsequent bulk segment is dropped with a checksum mismatch, and the TCP
+  connection collapses after ~15 s. Sustained iperf2 uplink is now restored
+  (~5-7 Mbit/s on `Emac<10, 10, 1600>` against `iperf -s`). `TDES0.CIC` is now
+  `0b00` and `Driver::capabilities()` advertises `ChecksumCapabilities::default()`
+  so smoltcp computes IPv4/TCP/UDP/ICMP checksums in software. `GMACCONFIG.IPC`
+  (RX hardware verification) remains enabled — the bug is one-sided to the
+  TX insertion path. The cost is a few extra cycles per outbound packet for
+  the software checksum computation; bench data is documented in the release
+  notes.
+
 ## [0.4.0] - 2026-05-19
 
 ### Changed (breaking — module rename)

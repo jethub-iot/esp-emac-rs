@@ -193,8 +193,20 @@ impl TxDescriptor {
     /// non-IPv4 frames the MAC ignores the CIC field, so setting it
     /// unconditionally is safe.
     pub fn prepare(&self, len: usize, first: bool, last: bool) {
-        // CIC = 0b11: full TCP/UDP/ICMP + IPv4-header checksum insertion.
-        let mut flags = tdes0::SECOND_ADDR_CHAINED | (0b11u32 << tdes0::CHECKSUM_INSERT_SHIFT);
+        // Hardware checksum offload (CIC bits in TDES0[23:22]) is **disabled**
+        // because it produces frames with broken TCP/UDP checksums on ESP32
+        // rev v3.1 — wire-side capture shows the iperf2 client header (60 B)
+        // gets through but every subsequent bulk-data segment is dropped by
+        // the peer's IP/TCP stack with a checksum mismatch, breaking any
+        // sustained TCP flow. The v0.3.0 release enabled CIC=0b11 (full
+        // TCP/UDP/ICMP + IPv4 header offload) on the assumption that the
+        // Synopsys GMAC checksum engine matched the spec; it does not on
+        // this silicon revision. CIC=0b00 forces the MAC to leave the
+        // checksum bytes alone — smoltcp computes them in software (see
+        // ChecksumCapabilities advertised by the embassy-net Driver impl).
+        // Verified working at ~6 Mbit/s iperf2 uplink against iperf -s on
+        // the same LAN.
+        let mut flags = tdes0::SECOND_ADDR_CHAINED;
 
         if first {
             flags |= tdes0::FIRST_SEGMENT;
@@ -608,14 +620,17 @@ mod tests {
     }
 
     #[test]
-    fn tx_descriptor_prepare_sets_cic_full_offload() {
-        // CIC = 0b11 in bits 23:22 means the MAC inserts IPv4 + TCP/UDP/ICMP
-        // checksums with pseudo-header. Verify prepare() always sets it.
+    fn tx_descriptor_prepare_disables_cic() {
+        // CIC bits 23:22 = 0b00: the MAC must NOT touch the checksum field
+        // because hardware insertion is broken on ESP32 rev v3.1 — see
+        // `TxDescriptor::prepare` doc-comment for the wire-side evidence.
+        // smoltcp computes checksums in software (Driver::capabilities
+        // advertises `ChecksumCapabilities::default()`).
         let desc = TxDescriptor::new();
         desc.prepare(64, true, true);
         let raw = desc.raw_tdes0();
         let cic = (raw >> tdes0::CHECKSUM_INSERT_SHIFT) & 0x3;
-        assert_eq!(cic, 0b11, "CIC must be 0b11 for full HW checksum offload");
+        assert_eq!(cic, 0b00, "CIC must be 0b00 — HW checksum offload disabled");
     }
 
     #[test]
