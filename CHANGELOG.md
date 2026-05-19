@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-19
+
 ### Changed (breaking — module rename)
 
 - Rename `esp_emac::embassy` module to `esp_emac::embassy_net` — the
@@ -70,10 +72,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   driving the histograms). Builds without this flag pay zero —
   every counter, timestamp, and histogram bucket is gated behind it.
 
+### Backports from upstream esp-hal
+
+После merge of esp-rs/esp-hal ESP32 ethernet support, в этот release добавлены три low-risk pattern из upstream:
+
+- **B2.1** — `Acquire`/`Release` memory fences вокруг DMA ownership transitions
+  в `dma/engine.rs`. Internal correctness fix per Rust memory model: на ESP32
+  LX6 без write-back data cache fences действуют как compiler fences,
+  предотвращая reorder data writes относительно OWN bit updates. Placement
+  verified против ESP-IDF reference implementation
+  (`components/esp_eth/src/mac/esp_eth_mac_esp_dma.c`):
+  TX commit — fence(Release) ПЕРЕД OWN write; RX recycle — fence(Release)
+  ПОСЛЕ OWN write (no payload writes precede OWN). No public API change.
+- **B2.3** — Compile-time `const _: () = assert!(size_of::<TDes>() == 32)`
+  together with `offset_of!` assertions для `TxDescriptor`/`RxDescriptor`.
+  Catches silent layout regressions at build time instead of test execution.
+- **B2.4** — Idempotent `set_speed`/`set_duplex` guards. Calls с unchanged
+  value теперь no-op — avoids redundant MMIO writes when PHY-link state
+  polling reports steady link. Adds private cached `current_speed` /
+  `current_duplex` fields. No public API change.
+
+Backport plan и reasoning: see [testsuite-firmware spec](https://github.com/jethome-iot/testsystem-firmware-esp/blob/main/docs/superpowers/specs/2026-05-19-esp-hal-fork-and-backports-strategy-design.md) §3.1.
+
 ### Notes
 
-- No version bump in `Cargo.toml`. These additions will be exercised
-  through consumer-side iterations before a coordinated minor release.
+- All host-side unit tests pass (159 OK).
+- No regressions vs 0.3.0 — backports are additive (B2.3, B2.1) or
+  performance-improving (B2.4) only.
 
 ## [0.3.0] - 2026-05-08
 
