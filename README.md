@@ -90,7 +90,7 @@ use esp_emac::embassy_net::{EmacDefaultDriver, EmacDriverState};
 use esp_emac::mdio::EspMdio;
 use esp_emac::EmacDefault;
 
-use eth_mdio_phy::{Duplex as PhyDuplex, PhyDriver, Speed as PhySpeed};
+use eth_mdio_phy::PhyDriver;
 use eth_phy_lan87xx::PhyLan87xx;
 
 // 1. Static storage — DMA holds raw pointers into the `Emac` instance,
@@ -147,25 +147,20 @@ async fn main(spawner: Spawner) {
     let mut phy = PhyLan87xx::new(/* PHY addr */ 1);
     phy.init(&mut mdio).expect("PHY init");
 
-    // 4. Wait for link, programme speed/duplex.
-    loop {
+    // 4. Wait for link, programme speed/duplex. `Speed` / `Duplex` are
+    //    re-exports of the trait-crate types under the `mdio-phy`
+    //    feature, so the PHY's `LinkState` lands directly into
+    //    `set_speed` / `set_duplex` with no conversion.
+    let state = loop {
         match phy.poll_link(&mut mdio) {
-            Ok(Some(status)) => {
-                emac.set_speed(match status.speed {
-                    PhySpeed::Mbps10 => EmacSpeed::Mbps10,
-                    PhySpeed::Mbps100 => EmacSpeed::Mbps100,
-                });
-                emac.set_duplex(match status.duplex {
-                    PhyDuplex::Half => EmacDuplex::Half,
-                    PhyDuplex::Full => EmacDuplex::Full,
-                });
-                EMAC_STATE.set_link_up();
-                break;
-            }
-            Ok(None) => delay.delay_ms(200),
-            Err(_) => delay.delay_ms(200),
+            Ok(s) if s.up => break s,
+            Ok(_) => delay.delay_ms(200),     // link still down
+            Err(_) => delay.delay_ms(200),    // transient MDIO error
         }
-    }
+    };
+    emac.set_speed(state.speed);
+    emac.set_duplex(state.duplex);
+    EMAC_STATE.set_link_up();
 
     emac.start().expect("EMAC start");
 

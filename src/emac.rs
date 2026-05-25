@@ -29,11 +29,11 @@ const TX_FIFO_FLUSH_TIMEOUT_US: u32 = 100_000;
 // =============================================================================
 
 // Re-export the link-parameter enums from the trait crate so a PHY
-// driver's `LinkStatus` lands directly into `set_speed` / `set_duplex`
+// driver's `LinkState` lands directly into `set_speed` / `set_duplex`
 // without the call-site `.into()` boilerplate that was needed when
 // these were duplicate local types. Keeping the types in one place
 // (eth_mdio_phy) also means a future minor-release variant addition
-// (`Speed::Mbps1000`) propagates through both ends of the stack with
+// (`Speed::_1000M`) propagates through both ends of the stack with
 // a single bump.
 //
 // Gated by the `mdio-phy` feature because that feature is what pulls
@@ -144,7 +144,7 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
     ///
     /// The ESP32 EMAC peripheral physically supports only 10 Mbps and
     /// 100 Mbps. `Speed` is `#[non_exhaustive]` in the trait crate, so
-    /// future variants (e.g. a hypothetical `Mbps1000`) compile but
+    /// future variants (e.g. a hypothetical `_1000M`) compile but
     /// have no register encoding here. They are clamped to 100 Mbps —
     /// the highest mode the EMAC actually supports — and a warning is
     /// emitted under the `defmt` feature so the discrepancy is
@@ -165,8 +165,8 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
             return;
         }
         let is_100 = match speed {
-            Speed::Mbps10 => false,
-            Speed::Mbps100 => true,
+            Speed::_10M => false,
+            Speed::_100M => true,
             _ => {
                 #[cfg(feature = "defmt")]
                 defmt::warn!(
