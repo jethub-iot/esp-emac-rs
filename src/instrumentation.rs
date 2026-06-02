@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR Apache-2.0
+// Copyright (c) Viacheslav Bocharov <v@baodeep.com> and JetHome (r)
+
 //! Runtime observability snapshot of EMAC traffic and DMA state.
 //!
 //! Gated behind the `instrumentation` feature. Builds without this
