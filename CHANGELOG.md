@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-02
+
+### Breaking (transitive — eth-mdio-phy 0.3)
+
+- Bump dependency on `eth-mdio-phy` to `^0.3` and dev-dependency on
+  `eth-phy-lan87xx` to `^0.3`. Under the `mdio-phy` feature this crate
+  re-exports `Speed` and `Duplex` from `eth_mdio_phy`, so downstream
+  consumers see the upstream renames bleed through:
+  - `Speed::Mbps10` / `Speed::Mbps100` → `Speed::_10M` / `Speed::_100M`
+    (matches `esp_hal::ethernet::phy::Speed` variant naming).
+  - `LinkStatus { speed, duplex }` + `Option<LinkStatus>` signalling →
+    `LinkState { up: bool, speed, duplex }` (signalling moves from
+    `Option`'s `None` to the explicit `up` flag).
+  - PHY drivers' `poll_link` return: `Result<Option<LinkStatus>, _>` →
+    `Result<LinkState, _>`.
+
+  Migration for callers that pass `PhyDriver::poll_link` results into
+  `Emac::set_speed` / `Emac::set_duplex`:
+
+  ```rust
+  // before (0.4.x with eth-mdio-phy 0.2)
+  match phy.poll_link(mdio) {
+      Ok(Some(link)) => {
+          emac.set_speed(link.speed);   // Speed::Mbps100
+          emac.set_duplex(link.duplex);
+      }
+      Ok(None) => { /* link down */ }
+      Err(e) => ...
+  }
+  // after (0.5.0 with eth-mdio-phy 0.3)
+  match phy.poll_link(mdio) {
+      Ok(state) if state.up => {
+          emac.set_speed(state.speed);  // Speed::_100M
+          emac.set_duplex(state.duplex);
+      }
+      Ok(_) => { /* link down */ }
+      Err(e) => ...
+  }
+  ```
+
+  `Speed` and `LinkState` are marked `#[non_exhaustive]` upstream — any
+  remaining `match` arms over them must add a wildcard.
+
+### Changed
+
+- `examples/embassy_net_lan8720a.rs`: rewrite the PHY poll loop to use
+  the new `Result<LinkState, _>` shape (`if Ok(s) if s.up`) and drop
+  the `PhySpeed` / `PhyDuplex` rename aliases — the re-exports under
+  `mdio-phy` are the same type identity as `eth_mdio_phy::Speed` /
+  `Duplex` now, so no cross-crate conversion is needed.
+- `src/emac.rs`: doc-comments and internal match arms updated to the
+  `_10M` / `_100M` variant names.
+- `README.md`: drop the `PhySpeed` / `PhyDuplex` alias-naming guidance
+  for the same reason.
+
+### Notes
+
+- No changes to the public `Emac` / `EmacDriver` API surface beyond the
+  transitive type renames above. Behaviour on hardware (TX/RX paths,
+  DMA descriptor handling, link bring-up sequence, instrumentation) is
+  identical to 0.4.1.
+- Hardware verification: jxd-pm380-e1eth (ESP32 rev v3.1) — link UP
+  `_100M Full`, DHCP, iperf2 cycles complete. See firmware PR
+  jethome-iot/testsystem-firmware-esp#54 for UART capture.
+
 ## [0.4.1] - 2026-05-19
 
 ### Fixed
