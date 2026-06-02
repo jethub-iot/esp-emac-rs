@@ -19,9 +19,9 @@ TCP/IP stack.
 
 ```toml
 [dependencies]
-esp-emac        = { version = "0.3", features = ["esp-hal", "mdio-phy", "embassy-net"] }
-eth-mdio-phy    = "0.2"
-eth-phy-lan87xx = "0.2"   # or any other eth_mdio_phy::PhyDriver impl
+esp-emac        = { version = "0.5", features = ["esp-hal", "mdio-phy", "embassy-net"] }
+eth-mdio-phy    = "0.3"
+eth-phy-lan87xx = "0.3"   # or any other eth_mdio_phy::PhyDriver impl
 
 # Required runtime stack
 esp-hal           = { version = "1.1", features = ["esp32", "unstable"] }
@@ -55,10 +55,11 @@ The typical firmware build enables `esp-hal + mdio-phy + embassy-net`.
 
 ### Compatibility
 
-| esp-emac | esp-hal | embassy-net | embassy-executor | Rust target |
-| --- | --- | --- | --- | --- |
-| 0.3.x | 1.1.x | 0.9.x | 0.10.x | `xtensa-esp32-none-elf` |
-| 0.2.x | 1.1.x | 0.9.x | 0.10.x | `xtensa-esp32-none-elf` |
+| esp-emac | esp-hal | embassy-net | embassy-executor | eth-mdio-phy | Rust target |
+| --- | --- | --- | --- | --- | --- |
+| 0.5.x | 1.1.x | 0.9.x | 0.10.x | 0.3.x | `xtensa-esp32-none-elf` |
+| 0.4.x | 1.1.x | 0.9.x | 0.10.x | 0.2.x | `xtensa-esp32-none-elf` |
+| 0.3.x | 1.0.x | 0.9.x | 0.9.x | 0.2.x | `xtensa-esp32-none-elf` |
 
 Other ESP variants (S2/S3/C-series/H2) have **no** built-in EMAC — use
 SPI Ethernet (W5500, ENC28J60) instead. ESP32-P4 has a newer Synopsys
@@ -82,10 +83,13 @@ use embassy_executor::Spawner;
 use embassy_net::{DhcpConfig, Runner, Stack, StackResources};
 use embassy_time::{Duration, Timer};
 use embedded_hal::delay::DelayNs;
-use esp_hal::{delay::Delay, interrupt::Priority, rng::Rng};
+use esp_hal::{
+    delay::Delay,
+    interrupt::{software::SoftwareInterruptControl, Priority},
+    rng::Rng,
+};
 
 use esp_emac::config::{ClkGpio, EmacConfig, RmiiClockConfig, RmiiPins, XtalFreq};
-use esp_emac::emac::{Duplex as EmacDuplex, Speed as EmacSpeed};
 use esp_emac::embassy_net::{EmacDefaultDriver, EmacDriverState};
 use esp_emac::mdio::EspMdio;
 use esp_emac::EmacDefault;
@@ -129,9 +133,13 @@ async fn main(spawner: Spawner) {
     let peripherals = esp_hal::init(esp_hal::Config::default());
 
     // esp-rtos owns the embassy timer + scheduler. Start it before any
-    // `Timer::after(...)` or `spawner.spawn(...)` can fire.
+    // `Timer::after(...)` or `spawner.spawn(...)` can fire. As of
+    // esp-rtos 0.3 the scheduler also needs the FROM_CPU0 software
+    // interrupt to drive context switches, so we hand it
+    // `software_interrupt0` from `SoftwareInterruptControl`.
     let timg0 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
-    esp_rtos::start(timg0.timer0);
+    let sw_ints = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    esp_rtos::start(timg0.timer0, sw_ints.software_interrupt0);
 
     let mut delay = Delay::new();
     let rng = Rng::new();
@@ -401,8 +409,10 @@ Cold boot, soft reset (DTR-toggle / `RTC_CNTL.SW_SYS_RST`), and USB
 power-cycle all yield the same behaviour: PHY init → link up
 100 Mbps full → DHCP → ICMP/HTTP.
 
-A reference firmware integration is in
-[`testsystem-firmware-esp / src-hal/firmware/src/net/ethernet.rs`](https://github.com/jethome-iot/testsystem-firmware-esp/blob/main/src-hal/firmware/src/net/ethernet.rs).
+For a full driver-side integration walk-through (link monitoring,
+DHCP lifecycle, embassy-net task wiring) see the
+[`examples/embassy_net_lan8720a.rs`](examples/embassy_net_lan8720a.rs)
+example bundled with this crate.
 
 ## License
 

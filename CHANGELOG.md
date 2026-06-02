@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No pending changes._
+
 ## [0.5.0] - 2026-06-02
 
 ### Breaking (transitive — eth-mdio-phy 0.3)
@@ -68,9 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transitive type renames above. Behaviour on hardware (TX/RX paths,
   DMA descriptor handling, link bring-up sequence, instrumentation) is
   identical to 0.4.1.
-- Hardware verification: jxd-pm380-e1eth (ESP32 rev v3.1) — link UP
-  `_100M Full`, DHCP, iperf2 cycles complete. See firmware PR
-  jethome-iot/testsystem-firmware-esp#54 for UART capture.
+- Hardware verification: validated on a JXD-PM380-E1ETH bench
+  (ESP32 rev v3.1) — link UP `_100M Full`, DHCP, iperf2 cycles
+  complete without regression vs 0.4.1.
 
 ## [0.4.1] - 2026-05-19
 
@@ -181,7 +183,9 @@ After the merge of esp-rs/esp-hal ESP32 ethernet support, this release adds thre
   PHY-link state polling reports a steady link. Adds private cached
   `current_speed` / `current_duplex` fields. No public API change.
 
-Backport plan and reasoning: see the [testsystem-firmware-esp spec](https://github.com/jethome-iot/testsystem-firmware-esp/blob/main/docs/superpowers/specs/2026-05-19-esp-hal-fork-and-backports-strategy-design.md) §3.1.
+Backport plan and reasoning are tracked in the integrator's
+documentation alongside the upstream-esp-hal fork strategy; reach
+out to the maintainers if you need the rationale write-up.
 
 ### Notes
 
@@ -362,6 +366,10 @@ Backport plan and reasoning: see the [testsystem-firmware-esp spec](https://gith
   `reset::async_impl::AsyncResetController` (feature `async`).
 - `clock` module — APLL 50 MHz programming and GPIO0/16/17 routing.
 
+[0.5.0]: https://github.com/jethub-iot/esp-emac-rs/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/jethub-iot/esp-emac-rs/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/jethub-iot/esp-emac-rs/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/jethub-iot/esp-emac-rs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jethub-iot/esp-emac-rs/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/jethub-iot/esp-emac-rs/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/jethub-iot/esp-emac-rs/compare/v0.1.0...v0.1.1
