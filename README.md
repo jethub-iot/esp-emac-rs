@@ -304,13 +304,16 @@ silently produces an off-frequency RMII reference clock.
   any `embedded_hal::delay::DelayNs`.
 * `clock` — APLL 50 MHz programming for the RMII reference clock,
   plus GPIO0/16/17 routing.
-* **Hardware checksum offload** (since 0.3.0) — unconditional. TX
-  descriptors request full IPv4/TCP/UDP/ICMP checksum insertion
-  (`TDES0.CIC = 0b11`); RX path uses `GMACCONFIG.IPC` and silently
-  drops frames with bad checksums before they reach the host. The
-  `embassy-net` adapter advertises `Checksum::None` for those
-  protocols so smoltcp skips the software computation. No API; no
-  feature flag; nothing for the caller to do.
+* **Hardware checksum offload** — **disabled since 0.4.1.** The
+  ESP32 rev v3.1 silicon's checksum engine is unreliable in both
+  directions: TX-side insertion mangles every bulk segment past the
+  first; RX-side `GMACCONFIG.IPC = 1` marks valid frames as
+  checksum-errored and the DMA drops them. Both 0.3.0 enable-bits
+  (`TDES0.CIC = 0b11`, `GMACCONFIG.IPC`) are now 0, and
+  `Driver::capabilities()` advertises the default
+  `ChecksumCapabilities` so smoltcp computes and verifies
+  IPv4/TCP/UDP/ICMP checksums in software. Cost is a few CPU cycles
+  per packet; full root-cause notes are in CHANGELOG 0.4.1.
 
 ### RMII clock modes
 
