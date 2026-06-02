@@ -117,20 +117,20 @@ async fn main(spawner: Spawner) {
     // `phy.poll_link` periodically and call
     // `EMAC_STATE.set_link_up() / set_link_down()` on transitions; this
     // example keeps things linear for clarity.
-    let status = loop {
+    let state = loop {
         match phy.poll_link(&mut mdio) {
-            Ok(Some(s)) => break s,
-            Ok(None) => {}
+            Ok(s) if s.up => break s,
+            Ok(_) => {}  // link still down
             Err(_) => {} // transient MDIO read errors at very early boot
         }
         delay.delay_millis(200);
     };
 
     // `Speed` / `Duplex` are re-exports of the trait-crate types
-    // under the `mdio-phy` feature, so the PHY's `LinkStatus` lands
+    // under the `mdio-phy` feature, so the PHY's `LinkState` lands
     // directly into `set_speed` / `set_duplex` with no conversion.
-    emac.set_speed(status.speed);
-    emac.set_duplex(status.duplex);
+    emac.set_speed(state.speed);
+    emac.set_duplex(state.duplex);
     EMAC_STATE.set_link_up();
 
     emac.start().expect("EMAC start");
