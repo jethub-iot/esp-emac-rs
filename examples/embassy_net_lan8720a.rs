@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR Apache-2.0
+// Copyright (c) Viacheslav Bocharov <v@baodeep.com> and JetHome (r)
+
 //! Embassy-net + LAN8720A example for ESP32 with built-in EMAC.
 //!
 //! Brings up the MAC + PHY, joins DHCP and prints the acquired

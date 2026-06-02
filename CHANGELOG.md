@@ -366,6 +366,7 @@ out to the maintainers if you need the rationale write-up.
   `reset::async_impl::AsyncResetController` (feature `async`).
 - `clock` module — APLL 50 MHz programming and GPIO0/16/17 routing.
 
+[Unreleased]: https://github.com/jethub-iot/esp-emac-rs/compare/v0.5.0...HEAD
 [0.5.0]: https://github.com/jethub-iot/esp-emac-rs/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/jethub-iot/esp-emac-rs/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jethub-iot/esp-emac-rs/compare/v0.3.0...v0.4.0
