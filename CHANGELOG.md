@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No pending changes._
 
-## [0.5.0] - 2026-06-02
+## [0.5.0] - 2026-06-09
 
 ### Breaking (transitive — eth-mdio-phy 0.3)
 
@@ -51,6 +51,18 @@ _No pending changes._
 
   `Speed` and `LinkState` are marked `#[non_exhaustive]` upstream — any
   remaining `match` arms over them must add a wildcard.
+
+- Bump optional `defmt` dependency from `^0.3` to `^1.0`. Aligns with
+  the rest of the embedded ecosystem (`esp-hal 1.1.x` and
+  `embassy-net 0.9.x` already require `defmt ^1.0.1`), so a downstream
+  that enables the `defmt` feature on this crate alongside a current
+  `esp-hal` / `embassy-net` release no longer ends up with two
+  `defmt` versions in its lock graph. defmt's global-logger ABI is
+  not version-compatible across `0.3` → `1.0`, so the duplicate would
+  be a real link error rather than just a noisy warning. Use sites
+  in this crate — `defmt::Format` derives and the `defmt::warn!`
+  call sites in `Emac::set_speed` / `set_duplex` — are
+  source-compatible across the jump.
 
 ### Changed
 

@@ -43,7 +43,7 @@ eth-mdio-phy       = { version = "0.3.0", path = "../eth-phy/crates/eth-mdio-phy
 embassy-net-driver = { version = "0.2", optional = true }
 embassy-sync       = { version = "0.8", optional = true }
 critical-section   = { version = "1.2", optional = true }
-defmt              = { version = "0.3", optional = true }
+defmt              = { version = "1.0", optional = true }
 
 # Host-target dev deps: `critical-section` with the `std` feature is
 # needed by unit tests of the `regs/*` modules. Gated to non-baremetal
